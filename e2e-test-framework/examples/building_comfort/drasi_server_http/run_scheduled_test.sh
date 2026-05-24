@@ -123,34 +123,23 @@ download_drasi_server() {
     fi
     log "drasi-server release tag: $tag"
 
-    local asset=""
+    # drasi-server publishes raw, unarchived per-target binaries named
+    # `drasi-server-<arch>-<os>-<libc>`. Pick by $DRASI_TARGET (default
+    # x86_64-linux-gnu) so this script also works on ARM runners.
+    local target="${DRASI_TARGET:-x86_64-linux-gnu}"
+    local asset_name="drasi-server-${target}"
+    log "Selected asset: $asset_name"
+
     if command -v gh >/dev/null 2>&1; then
-        gh release download "$tag" --repo "$DRASI_REPO" --pattern '*linux*x86_64*' 2>/dev/null \
-            || gh release download "$tag" --repo "$DRASI_REPO" --pattern '*linux*amd64*'
+        gh release download "$tag" --repo "$DRASI_REPO" --pattern "$asset_name"
     else
-        local url
-        url="$(curl -fsSL "https://api.github.com/repos/${DRASI_REPO}/releases/tags/${tag}" \
-            | jq -r '.assets[] | select(.name | test("linux.*(x86_64|amd64)"; "i")) | .browser_download_url' \
-            | head -n1)"
-        [[ -z "$url" ]] && { log "ERROR: no linux x86_64 asset on release $tag"; return 1; }
-        curl -fsSL -O "$url"
+        curl -fsSL -O "https://github.com/${DRASI_REPO}/releases/download/${tag}/${asset_name}"
     fi
+    [[ -f "$asset_name" ]] || { log "ERROR: download did not produce $asset_name"; ls -la; return 1; }
+    chmod +x "$asset_name"
+    mv "$asset_name" drasi-server
 
-    for f in *.tar.gz *.tgz; do [[ -f "$f" ]] && tar -xzf "$f"; done
-    for f in *.zip;            do [[ -f "$f" ]] && unzip -o "$f"; done
-
-    local bin
-    bin="$(find . -type f -name drasi-server -perm -u+x | head -n1 || true)"
-    if [[ -z "$bin" ]]; then
-        bin="$(find . -type f -name drasi-server | head -n1)"
-        [[ -n "$bin" ]] && chmod +x "$bin"
-    fi
-    if [[ -z "$bin" ]]; then
-        log "ERROR: drasi-server binary not found in release assets"
-        ls -laR
-        return 1
-    fi
-    DRASI_SERVER_BIN="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"
+    DRASI_SERVER_BIN="$DOWNLOAD_DIR/drasi-server"
     export DRASI_SERVER_BIN
     log "DRASI_SERVER_BIN=$DRASI_SERVER_BIN"
     "$DRASI_SERVER_BIN" --version || true
