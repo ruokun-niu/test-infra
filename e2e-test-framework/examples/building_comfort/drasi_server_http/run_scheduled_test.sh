@@ -168,7 +168,12 @@ start_drasi_server() {
     ) &
     DRASI_PID=$!
     log "drasi-server pid=$DRASI_PID"
-    wait_for_port 127.0.0.1 "$DRASI_SOURCE_PORT" "drasi-server source"
+    if ! wait_for_port 127.0.0.1 "$DRASI_SOURCE_PORT" "drasi-server source"; then
+        log "--- drasi-server.log (last 200 lines) ---"
+        tail -n 200 "$LOG_DIR/drasi-server.log" || true
+        log "--- end drasi-server.log ---"
+        return 1
+    fi
 }
 
 start_test_service() {
@@ -181,7 +186,12 @@ start_test_service() {
     ) &
     SERVICE_PID=$!
     log "test-service pid=$SERVICE_PID"
-    wait_for_port 127.0.0.1 "$TEST_SERVICE_PORT" "test-service API" 600
+    if ! wait_for_port 127.0.0.1 "$TEST_SERVICE_PORT" "test-service API" 600; then
+        log "--- test-service.log (last 200 lines) ---"
+        tail -n 200 "$LOG_DIR/test-service.log" || true
+        log "--- end test-service.log ---"
+        return 1
+    fi
 }
 
 poll_until_stopped() {
