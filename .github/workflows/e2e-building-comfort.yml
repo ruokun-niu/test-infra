@@ -68,6 +68,10 @@ jobs:
           [[ -z "$mins" ]] && mins=30
           echo "TIMEOUT_SECS=$(( mins * 60 ))" >> "$GITHUB_ENV"
 
+      - name: Build test-service
+        working-directory: e2e-test-framework
+        run: cargo build --release --manifest-path test-service/Cargo.toml
+
       - name: Run scheduled test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
