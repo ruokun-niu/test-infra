@@ -198,7 +198,8 @@ poll_until_stopped() {
     local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/reactions/${TEST_REACTION_ID}"
     log "Polling $url (timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s)"
     local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
-    local last_count="-"
+    local start_ts=$(( $(date +%s) ))
+    local last_log_ts=0
     while (( $(date +%s) < deadline )); do
         if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
             log "ERROR: test-service exited unexpectedly"
@@ -208,30 +209,42 @@ poll_until_stopped() {
             log "ERROR: drasi-server exited unexpectedly"
             return 1
         fi
-        local body status count
-        body="$(curl -fsS "$url" 2>/dev/null || true)"
-        if [[ -n "$body" ]]; then
+        local http_code body status count now elapsed
+        http_code="$(curl -sS -o /tmp/poll_body.$$ -w '%{http_code}' "$url" 2>/dev/null || echo '000')"
+        body="$(cat /tmp/poll_body.$$ 2>/dev/null || true)"
+        rm -f /tmp/poll_body.$$
+        status="Unknown"
+        count="?"
+        if [[ "$http_code" == "200" && -n "$body" ]]; then
             status="$(echo "$body" | jq -r '.reaction_observer.status // "Unknown"')"
             count="$(echo "$body"  | jq -r '.reaction_observer.result_summary.record_count // .reaction_observer.result_summary.reaction_invocation_count // "?"')"
-            if [[ "$count" != "$last_count" ]]; then
-                log "status=$status records=$count"
-                last_count="$count"
-            fi
-            if [[ "$status" == "Stopped" ]]; then
-                echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
-                log "Reaction reached Stopped state"
-                return 0
-            fi
-            if [[ "$status" == "Error" ]]; then
-                echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
-                log "ERROR: reaction entered Error state"
-                return 1
-            fi
+        fi
+        now=$(date +%s)
+        elapsed=$(( now - start_ts ))
+        if (( now - last_log_ts >= 30 )); then
+            log "poll t=${elapsed}s http=${http_code} status=${status} records=${count}"
+            last_log_ts=$now
+        fi
+        if [[ "$status" == "Stopped" ]]; then
+            echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
+            log "Reaction reached Stopped state"
+            return 0
+        fi
+        if [[ "$status" == "Error" ]]; then
+            echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
+            log "ERROR: reaction entered Error state"
+            return 1
         fi
         sleep "$POLL_INTERVAL_SECS"
     done
     log "ERROR: test did not complete within ${TIMEOUT_SECS}s"
-    curl -fsS "$url" > "$ARTIFACTS_DIR/final_reaction_state.json" 2>/dev/null || true
+    log "--- test-service.log (last 100 lines) ---"
+    tail -n 100 "$LOG_DIR/test-service.log" || true
+    log "--- end test-service.log ---"
+    log "--- drasi-server.log (last 100 lines) ---"
+    tail -n 100 "$LOG_DIR/drasi-server.log" || true
+    log "--- end drasi-server.log ---"
+    curl -sS "$url" > "$ARTIFACTS_DIR/final_reaction_state.json" 2>/dev/null || true
     return 1
 }
 
