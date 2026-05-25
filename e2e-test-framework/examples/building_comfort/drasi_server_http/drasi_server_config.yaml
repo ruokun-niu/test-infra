@@ -59,7 +59,6 @@ reactions:
     autoStart: true
     queries:
       - building-comfort
-    baseUrl: "http://localhost:9001"
     timeoutMs: 60000
     headers:
       Content-Type: "application/json"
@@ -68,10 +67,10 @@ reactions:
       building-comfort:
         added:
           method: POST
-          path: "/reaction"
+          url: "http://localhost:9001/reaction"
         updated:
           method: POST
-          path: "/reaction"
+          url: "http://localhost:9001/reaction"
         deleted:
           method: POST
-          path: "/reaction"
+          url: "http://localhost:9001/reaction"
