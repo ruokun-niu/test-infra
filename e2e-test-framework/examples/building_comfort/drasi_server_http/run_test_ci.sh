@@ -28,7 +28,8 @@
 #   DRASI_ADMIN_PORT      Admin port to patch into drasi_server_config.yaml. Default: 8090
 #   DRASI_SOURCE_PORT     HTTP source port. Default: 9000
 #   TEST_SERVICE_PORT     test-service REST API port. Default: 63123
-#   TEST_RUN_ID           Must match config.json. Default: test_run_001
+#   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
+#                         Default: drasi_server_dev_repo.building_comfort.test_run_001
 #   TEST_REACTION_ID      Must match config.json. Default: building-comfort
 #   TIMEOUT_SECS          Max seconds to wait for Stopped state. Default: 1800
 #   POLL_INTERVAL_SECS    Seconds between status polls. Default: 10
@@ -45,7 +46,7 @@ DRASI_SERVER_VERSION="${DRASI_SERVER_VERSION:-}"
 DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
 DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
-TEST_RUN_ID="${TEST_RUN_ID:-test_run_001}"
+TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
 TEST_REACTION_ID="${TEST_REACTION_ID:-building-comfort}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-10}"
