@@ -27,7 +27,7 @@
 #   DRASI_SERVER_BIN      Pre-downloaded binary; skips the download step.
 #   DRASI_ADMIN_PORT      Admin port to patch into drasi_server_config.yaml. Default: 8090
 #   DRASI_SOURCE_PORT     HTTP source port. Default: 9000
-#   TEST_SERVICE_PORT     test-service REST API port. Default: 8080
+#   TEST_SERVICE_PORT     test-service REST API port. Default: 63123
 #   TEST_RUN_ID           Must match config.json. Default: test_run_001
 #   TEST_REACTION_ID      Must match config.json. Default: building-comfort
 #   TIMEOUT_SECS          Max seconds to wait for Stopped state. Default: 1800
@@ -44,7 +44,7 @@ DRASI_REPO="${DRASI_REPO:-drasi-project/drasi-server}"
 DRASI_SERVER_VERSION="${DRASI_SERVER_VERSION:-}"
 DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
 DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
-TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-8080}"
+TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-test_run_001}"
 TEST_REACTION_ID="${TEST_REACTION_ID:-building-comfort}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
