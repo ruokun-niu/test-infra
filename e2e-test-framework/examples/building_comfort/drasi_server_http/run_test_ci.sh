@@ -68,6 +68,40 @@ SERVICE_PID=""
 
 log() { echo "[ci] $*"; }
 
+print_summary() {
+    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
+    echo "::group::Final reaction state"
+    if [[ -s "$state_file" ]]; then
+        jq '{
+            id: .id,
+            status: .reaction_observer.status,
+            handler_status: .reaction_observer.handler_status,
+            error_message: .reaction_observer.error_message,
+            result_summary: .reaction_observer.result_summary,
+            logger_results: .reaction_observer.logger_results
+        }' "$state_file" 2>/dev/null || cat "$state_file"
+        local runtime invocations
+        runtime="$(jq -r '.reaction_observer.result_summary.observer_runtime_s // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+        invocations="$(jq -r '.reaction_observer.result_summary.reaction_invocation_count // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+        log "Observer runtime: $runtime  Reaction invocations: $invocations"
+    else
+        log "No final_reaction_state.json available"
+    fi
+    echo "::endgroup::"
+
+    echo "::group::Performance metrics output"
+    local found=0
+    while IFS= read -r -d '' metrics_file; do
+        found=1
+        log "--- $metrics_file ---"
+        jq '.' "$metrics_file" 2>/dev/null || cat "$metrics_file"
+    done < <(find "$DATA_CACHE" -path '*output_log/performance_metrics/*.json' -type f -print0 2>/dev/null || true)
+    if (( found == 0 )); then
+        log "No performance_metrics JSON files found under $DATA_CACHE"
+    fi
+    echo "::endgroup::"
+}
+
 cleanup() {
     local exit_code=$?
     set +e
@@ -253,4 +287,8 @@ download_drasi_server
 patch_configs
 start_drasi_server
 start_test_service
-poll_until_stopped
+
+poll_rc=0
+poll_until_stopped || poll_rc=$?
+print_summary
+exit "$poll_rc"
