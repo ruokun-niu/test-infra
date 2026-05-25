@@ -50,6 +50,18 @@ jobs:
       - name: Install runtime deps (jq, curl)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq curl
 
+      # test-run-host enables drasi-core's `middleware-jq` feature, which
+      # pulls in jq-sys; jq-sys links against the system libjq + libonig.
+      # Mirror lint.yml / drasi-server's Dockerfile.
+      - name: Install build deps for libjq
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libjq-dev libonig-dev \
+            libprotobuf-dev protobuf-compiler cmake clang libclang-dev
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=$(dirname $(find /usr/lib -name 'libjq.so' | head -1))" >> "$GITHUB_ENV"
+
       - name: Compute timeout (seconds)
         run: |
           mins="${{ inputs.timeout_minutes }}"
@@ -61,7 +73,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
           WORK_DIR: ${{ runner.temp }}/ci_work
-        run: bash "${WORKDIR}/run_scheduled_test.sh"
+        run: bash "${WORKDIR}/run_test_ci.sh"
 
       - name: Upload artifacts
         if: always()
