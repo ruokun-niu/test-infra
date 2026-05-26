@@ -1,7 +1,7 @@
 # Scheduled E2E test: building_comfort against an external drasi-server (HTTP).
 #
 # Each test pattern lives in its own example folder and exposes a
-# `run_scheduled_test.sh` that downloads the drasi-server release binary,
+# `run_test_ci.sh` that downloads the drasi-server release binary,
 # orchestrates the run, and writes artifacts to $ARTIFACTS_DIR. This workflow
 # just sets env vars and invokes that script. To add another pattern, copy
 # this job and point WORKDIR at the new example folder.
@@ -34,6 +34,7 @@ jobs:
     env:
       WORKDIR: e2e-test-framework/examples/building_comfort/drasi_server_http
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
+      EXPECTED_REACTION_SHA256: ${{ vars.BUILDING_COMFORT_REACTION_SHA256 }}
 
     steps:
       - name: Checkout

@@ -31,6 +31,9 @@
 #   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
 #                         Default: drasi_server_dev_repo.building_comfort.test_run_001
 #   TEST_REACTION_ID      Must match config.json. Default: building-comfort
+#   EXPECTED_REACTION_SHA256
+#                         Optional expected SHA-256 fingerprint of canonical
+#                         reaction JsonlFile output. If set, mismatch fails CI.
 #   TIMEOUT_SECS          Max seconds to wait for Stopped state. Default: 1800
 #   POLL_INTERVAL_SECS    Seconds between status polls. Default: 10
 #   ARTIFACTS_DIR         Where to copy outputs. Default: ./ci_artifacts
@@ -48,6 +51,7 @@ DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
 TEST_REACTION_ID="${TEST_REACTION_ID:-building-comfort}"
+EXPECTED_REACTION_SHA256="${EXPECTED_REACTION_SHA256:-}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-10}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$SCRIPT_DIR/ci_artifacts}"
@@ -67,40 +71,6 @@ DRASI_PID=""
 SERVICE_PID=""
 
 log() { echo "[ci] $*"; }
-
-print_summary() {
-    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
-    echo "::group::Final reaction state"
-    if [[ -s "$state_file" ]]; then
-        jq '{
-            id: .id,
-            status: .reaction_observer.status,
-            handler_status: .reaction_observer.handler_status,
-            error_message: .reaction_observer.error_message,
-            result_summary: .reaction_observer.result_summary,
-            logger_results: .reaction_observer.logger_results
-        }' "$state_file" 2>/dev/null || cat "$state_file"
-        local runtime invocations
-        runtime="$(jq -r '.reaction_observer.result_summary.observer_runtime_s // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
-        invocations="$(jq -r '.reaction_observer.result_summary.reaction_invocation_count // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
-        log "Observer runtime: $runtime  Reaction invocations: $invocations"
-    else
-        log "No final_reaction_state.json available"
-    fi
-    echo "::endgroup::"
-
-    echo "::group::Performance metrics output"
-    local found=0
-    while IFS= read -r -d '' metrics_file; do
-        found=1
-        log "--- $metrics_file ---"
-        jq '.' "$metrics_file" 2>/dev/null || cat "$metrics_file"
-    done < <(find "$DATA_CACHE" -path '*output_log/performance_metrics/*.json' -type f -print0 2>/dev/null || true)
-    if (( found == 0 )); then
-        log "No performance_metrics JSON files found under $DATA_CACHE"
-    fi
-    echo "::endgroup::"
-}
 
 cleanup() {
     local exit_code=$?
@@ -170,6 +140,7 @@ download_drasi_server() {
     else
         curl -fsSL -O "https://github.com/${DRASI_REPO}/releases/download/${tag}/${asset_name}"
     fi
+
     [[ -f "$asset_name" ]] || { log "ERROR: download did not produce $asset_name"; ls -la; return 1; }
     chmod +x "$asset_name"
     mv "$asset_name" drasi-server
@@ -192,6 +163,14 @@ patch_configs() {
          | .data_store.delete_on_start = false
          | .data_store.delete_on_stop = false' \
         "$TEST_CFG_SRC" > "$TEST_CFG_CI"
+
+    # Enforce deterministic inputs by requiring explicit seed(s) for model sources.
+    local seed_count
+    seed_count="$(jq '[.data_store.test_repos[]?.local_tests[]?.sources[]? | select(.kind == "Model") | .model_data_generator.seed? | select(. != null)] | length' "$TEST_CFG_CI")"
+    if [[ "$seed_count" -eq 0 ]]; then
+        log "ERROR: No model_data_generator.seed configured in $TEST_CFG_CI"
+        return 1
+    fi
 }
 
 start_drasi_server() {
@@ -235,6 +214,7 @@ poll_until_stopped() {
     local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
     local start_ts=$(( $(date +%s) ))
     local last_log_ts=0
+
     while (( $(date +%s) < deadline )); do
         if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
             log "ERROR: test-service exited unexpectedly"
@@ -244,22 +224,26 @@ poll_until_stopped() {
             log "ERROR: drasi-server exited unexpectedly"
             return 1
         fi
+
         local http_code body status count now elapsed
         http_code="$(curl -sS -o /tmp/poll_body.$$ -w '%{http_code}' "$url" 2>/dev/null || echo '000')"
         body="$(cat /tmp/poll_body.$$ 2>/dev/null || true)"
         rm -f /tmp/poll_body.$$
+
         status="Unknown"
         count="?"
         if [[ "$http_code" == "200" && -n "$body" ]]; then
             status="$(echo "$body" | jq -r '.reaction_observer.status // "Unknown"')"
-            count="$(echo "$body"  | jq -r '.reaction_observer.result_summary.record_count // .reaction_observer.result_summary.reaction_invocation_count // "?"')"
+            count="$(echo "$body" | jq -r '.reaction_observer.result_summary.record_count // .reaction_observer.result_summary.reaction_invocation_count // "?"')"
         fi
+
         now=$(date +%s)
         elapsed=$(( now - start_ts ))
         if (( now - last_log_ts >= 30 )); then
             log "poll t=${elapsed}s http=${http_code} status=${status} records=${count}"
             last_log_ts=$now
         fi
+
         if [[ "$status" == "Stopped" ]]; then
             echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
             log "Reaction reached Stopped state"
@@ -270,8 +254,10 @@ poll_until_stopped() {
             log "ERROR: reaction entered Error state"
             return 1
         fi
+
         sleep "$POLL_INTERVAL_SECS"
     done
+
     log "ERROR: test did not complete within ${TIMEOUT_SECS}s"
     log "--- test-service.log (last 100 lines) ---"
     tail -n 100 "$LOG_DIR/test-service.log" || true
@@ -283,6 +269,94 @@ poll_until_stopped() {
     return 1
 }
 
+print_summary() {
+    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
+
+    echo "::group::Final reaction state"
+    if [[ -s "$state_file" ]]; then
+        jq '{
+            id: .id,
+            status: .reaction_observer.status,
+            handler_status: .reaction_observer.handler_status,
+            error_message: .reaction_observer.error_message,
+            result_summary: .reaction_observer.result_summary,
+            logger_results: .reaction_observer.logger_results
+        }' "$state_file" 2>/dev/null || cat "$state_file"
+
+        local runtime invocations
+        runtime="$(jq -r '.reaction_observer.result_summary.observer_runtime_s // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+        invocations="$(jq -r '.reaction_observer.result_summary.reaction_invocation_count // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+        log "Observer runtime: $runtime  Reaction invocations: $invocations"
+    else
+        log "No final_reaction_state.json available"
+    fi
+    echo "::endgroup::"
+
+    echo "::group::Performance metrics output"
+    local found=0
+    while IFS= read -r -d '' metrics_file; do
+        found=1
+        log "--- $metrics_file ---"
+        jq '.' "$metrics_file" 2>/dev/null || cat "$metrics_file"
+    done < <(find "$DATA_CACHE" -path '*output_log/performance_metrics/*.json' -type f -print0 2>/dev/null || true)
+
+    if (( found == 0 )); then
+        log "No performance_metrics JSON files found under $DATA_CACHE"
+    fi
+    echo "::endgroup::"
+}
+
+verify_deterministic_result() {
+    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
+    local jsonl_dir
+    local first_jsonl
+    local reaction_sha
+
+    if [[ ! -s "$state_file" ]]; then
+        log "WARNING: No final reaction state; skipping deterministic output hash"
+        return 0
+    fi
+
+    jsonl_dir="$(jq -r '.reaction_observer.logger_results[]? | select(.logger_name == "JsonlFile" and .has_output == true) | .output_folder_path' "$state_file" | head -n1)"
+    if [[ -z "$jsonl_dir" || ! -d "$jsonl_dir" ]]; then
+        log "WARNING: JsonlFile output folder not found from reaction state; skipping hash check"
+        return 0
+    fi
+
+    first_jsonl="$(find "$jsonl_dir" -name '*.jsonl' -type f -print -quit)"
+    if [[ -z "$first_jsonl" ]]; then
+        log "WARNING: No reaction JSONL files found in $jsonl_dir; skipping hash check"
+        return 0
+    fi
+
+    # Hash only canonical reaction payload content (not timestamps/trace metadata)
+    # so equal seeded runs are compared on actual result data.
+    reaction_sha="$(find "$jsonl_dir" -name '*.jsonl' -type f -print0 \
+        | sort -z \
+        | xargs -0 cat \
+        | jq -cS 'if .payload.type == "ReactionInvocation" then .payload.request_body elif .payload.type == "ReactionOutput" then .payload.reaction_output else .payload end' \
+        | sha256sum \
+        | awk '{print $1}')"
+    if [[ -z "$reaction_sha" ]]; then
+        log "WARNING: Failed to compute reaction output hash"
+        return 0
+    fi
+
+    printf '%s\n' "$reaction_sha" > "$ARTIFACTS_DIR/reaction_output_sha256.txt"
+    printf '%s\n' "$jsonl_dir" > "$ARTIFACTS_DIR/reaction_output_jsonl_dir.txt"
+    log "Reaction output SHA-256: $reaction_sha"
+
+    if [[ -n "$EXPECTED_REACTION_SHA256" ]]; then
+        if [[ "$reaction_sha" != "$EXPECTED_REACTION_SHA256" ]]; then
+            log "ERROR: Determinism check failed. expected=$EXPECTED_REACTION_SHA256 actual=$reaction_sha"
+            return 1
+        fi
+        log "Determinism check passed against EXPECTED_REACTION_SHA256"
+    else
+        log "No EXPECTED_REACTION_SHA256 provided; fingerprint emitted for baseline setup"
+    fi
+}
+
 download_drasi_server
 patch_configs
 start_drasi_server
@@ -291,4 +365,16 @@ start_test_service
 poll_rc=0
 poll_until_stopped || poll_rc=$?
 print_summary
-exit "$poll_rc"
+
+determinism_rc=0
+verify_deterministic_result || determinism_rc=$?
+
+if (( poll_rc != 0 )); then
+    exit "$poll_rc"
+fi
+
+if (( determinism_rc != 0 )); then
+    exit "$determinism_rc"
+fi
+
+exit 0
