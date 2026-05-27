@@ -40,8 +40,8 @@
                             "spacing_mode": "none",
                             "time_mode": "2025-01-03T10:03:15.4Z",
                             "building_count": [1, 0],
-                            "floor_count": [1, 0],
-                            "room_count": [1, 0],                   
+                            "floor_count": [3, 0],
+                            "room_count": [4, 0],                   
                             "room_sensors": [
                                 {
                                     "kind": "NormalFloat",
@@ -70,7 +70,8 @@
                             ]
                           },
                           "subscribers": [
-                            { "node_id": "default", "query_id": "building-comfort" }
+                            { "node_id": "default", "query_id": "building-comfort" },
+                            { "node_id": "default", "query_id": "building-comfort-floor-agg" }
                           ]
                         }
                       ],
@@ -80,6 +81,21 @@
                           "output_handler": {
                             "kind": "Http",
                             "port": 9001,
+                            "path": "/reaction",
+                            "correlation_header": "X-Query-Sequence"
+                          },
+                          "stop_triggers": [
+                            {
+                              "kind": "RecordCount",
+                              "record_count": 100000
+                            }
+                          ]
+                        },
+                        {
+                          "test_reaction_id": "building-comfort-floor-agg",
+                          "output_handler": {
+                            "kind": "Http",
+                            "port": 9002,
                             "path": "/reaction",
                             "correlation_header": "X-Query-Sequence"
                           },
@@ -106,6 +122,19 @@
               "reactions": [
                   {
                       "test_reaction_id": "building-comfort",
+                      "start_immediately": true,
+                      "output_loggers": [
+                          {
+                              "kind": "JsonlFile",
+                              "max_lines_per_file": 15000
+                          },
+                          {
+                              "kind": "PerformanceMetrics"
+                          }                      
+                      ]
+                  },
+                  {
+                      "test_reaction_id": "building-comfort-floor-agg",
                       "start_immediately": true,
                       "output_loggers": [
                           {

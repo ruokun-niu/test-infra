@@ -6,18 +6,25 @@ instead of gRPC.
 ## What this test does
 
 1. The E2E test service generates change events for a `BuildingHierarchy`
-   model (Rooms with `temperature` / `humidity` / `co2`).
+   model (1 building × 3 floors × 4 rooms; rooms carry
+   `temperature` / `humidity` / `co2`).
 2. Events are POSTed as HTTP webhooks to Drasi Server's source
    `facilities-db` listening on **http://localhost:9000**.
-3. Drasi Server runs the `building-comfort` Cypher query
-   (`MATCH (r:Room) RETURN ...`) and POSTs results to the test service's
-   HTTP reaction handler at **http://localhost:9001/reaction**.
-4. The test service stops after **100,000** events
+3. Drasi Server runs two Cypher queries against the same source:
+   - `building-comfort` &mdash; per-room raw values
+     (`MATCH (r:Room) RETURN ...`) &mdash; results POSTed to
+     **http://localhost:9001/reaction**.
+   - `building-comfort-floor-agg` &mdash; one-hop traversal plus
+     `avg` / `min` / `max` / `count` aggregations per floor
+     (`MATCH (f:Floor)-[:FLOOR_ROOM]->(r:Room) RETURN ...`) &mdash;
+     results POSTed to **http://localhost:9002/reaction**.
+4. The test service stops each reaction after **100,000** events
    (`stop_triggers.RecordCount`).
 
 ```
-test-service  --HTTP source--> Drasi Server  --HTTP reaction--> test-service
-   :8080        :9000                :8080      :9001/reaction      (logs/JSONL)
+test-service --HTTP source--> Drasi Server --HTTP reaction--> test-service
+   :8080         :9000              :8080      :9001/reaction (per-room)
+                                               :9002/reaction (floor-agg)
 ```
 
 ## Prerequisites
@@ -87,12 +94,13 @@ Client extension (or `curl`).
 
 ## Default ports
 
-| Component                                     | Port               |
-|-----------------------------------------------|--------------------|
-| Test service REST API                         | 8080               |
-| Drasi Server admin API                        | 8080 (override)    |
-| Drasi Server HTTP source (`facilities-db`)    | 9000               |
-| Test service HTTP reaction handler            | 9001 (path `/reaction`) |
+| Component                                          | Port                    |
+|----------------------------------------------------|-------------------------|
+| Test service REST API                              | 8080                    |
+| Drasi Server admin API                             | 8080 (override)         |
+| Drasi Server HTTP source (`facilities-db`)         | 9000                    |
+| Test service HTTP reaction handler (per-room)      | 9001 (path `/reaction`) |
+| Test service HTTP reaction handler (floor-agg)     | 9002 (path `/reaction`) |
 
 ## Troubleshooting
 

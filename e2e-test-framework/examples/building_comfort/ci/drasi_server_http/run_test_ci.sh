@@ -30,14 +30,15 @@
 #   TEST_SERVICE_PORT     test-service REST API port. Default: 63123
 #   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
 #                         Default: drasi_server_dev_repo.building_comfort.test_run_001
-#   TEST_REACTION_ID      Must match config.json. Default: building-comfort
-#   BUILDING_COMFORT_REACTION_SHA256
-#                         Pattern-specific expected SHA-256 fingerprint.
-#                         Preferred variable name for this test pattern.
-#   EXPECTED_REACTION_SHA256
-#                         Optional expected SHA-256 fingerprint of canonical
-#                         reaction JsonlFile output. Backward-compatible alias.
-#                         If either variable is set, mismatch fails CI.
+#   TEST_REACTION_IDS     Space-separated list of test_reaction_id values to
+#                         poll until Stopped and to hash for determinism.
+#                         Default: "building-comfort building-comfort-floor-agg"
+#   EXPECTED_SHA_FILE     Sidecar JSON mapping test_reaction_id -> expected
+#                         SHA-256 of the canonical reaction JsonlFile output.
+#                         Default: $SCRIPT_DIR/expected_reaction_sha256.json
+#                         Missing key or empty value = no baseline yet (the
+#                         script emits the actual SHA to artifacts and passes).
+#                         A non-empty value that doesn't match fails CI.
 #   TIMEOUT_SECS          Max seconds to wait for Stopped state. Default: 1800
 #   POLL_INTERVAL_SECS    Seconds between status polls. Default: 10
 #   ARTIFACTS_DIR         Where to copy outputs. Default: ./ci_artifacts
@@ -46,7 +47,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+# Script lives at examples/building_comfort/ci/drasi_server_http/ — five levels
+# below the repo root.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
 
 DRASI_REPO="${DRASI_REPO:-drasi-project/drasi-server}"
 DRASI_SERVER_VERSION="${DRASI_SERVER_VERSION:-}"
@@ -54,12 +57,12 @@ DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
 DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
-TEST_REACTION_ID="${TEST_REACTION_ID:-building-comfort}"
-EXPECTED_REACTION_SHA256="${BUILDING_COMFORT_REACTION_SHA256:-${EXPECTED_REACTION_SHA256:-}}"
+TEST_REACTION_IDS="${TEST_REACTION_IDS:-building-comfort building-comfort-floor-agg}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-10}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$SCRIPT_DIR/ci_artifacts}"
 WORK_DIR="${WORK_DIR:-$SCRIPT_DIR/.ci_work}"
+EXPECTED_SHA_FILE="${EXPECTED_SHA_FILE:-$SCRIPT_DIR/expected_reaction_sha256.json}"
 
 LOG_DIR="$WORK_DIR/logs"
 DOWNLOAD_DIR="$WORK_DIR/drasi-server-download"
@@ -213,8 +216,12 @@ start_test_service() {
 }
 
 poll_until_stopped() {
-    local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/reactions/${TEST_REACTION_ID}"
-    log "Polling $url (timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s)"
+    # poll_until_stopped <test_reaction_id>
+    # Writes final state to $ARTIFACTS_DIR/final_reaction_state__<id>.json on Stopped/Error.
+    local reaction_id="$1"
+    local state_file="$ARTIFACTS_DIR/final_reaction_state__${reaction_id}.json"
+    local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/reactions/${reaction_id}"
+    log "Polling [$reaction_id] $url (timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s)"
     local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
     local start_ts=$(( $(date +%s) ))
     local last_log_ts=0
@@ -244,57 +251,71 @@ poll_until_stopped() {
         now=$(date +%s)
         elapsed=$(( now - start_ts ))
         if (( now - last_log_ts >= 30 )); then
-            log "poll t=${elapsed}s http=${http_code} status=${status} records=${count}"
+            log "poll [$reaction_id] t=${elapsed}s http=${http_code} status=${status} records=${count}"
             last_log_ts=$now
         fi
 
         if [[ "$status" == "Stopped" ]]; then
-            echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
-            log "Reaction reached Stopped state"
+            echo "$body" > "$state_file"
+            log "[$reaction_id] reached Stopped state"
             return 0
         fi
         if [[ "$status" == "Error" ]]; then
-            echo "$body" > "$ARTIFACTS_DIR/final_reaction_state.json"
-            log "ERROR: reaction entered Error state"
+            echo "$body" > "$state_file"
+            log "ERROR: [$reaction_id] entered Error state"
             return 1
         fi
 
         sleep "$POLL_INTERVAL_SECS"
     done
 
-    log "ERROR: test did not complete within ${TIMEOUT_SECS}s"
+    log "ERROR: [$reaction_id] did not complete within ${TIMEOUT_SECS}s"
     log "--- test-service.log (last 100 lines) ---"
     tail -n 100 "$LOG_DIR/test-service.log" || true
     log "--- end test-service.log ---"
     log "--- drasi-server.log (last 100 lines) ---"
     tail -n 100 "$LOG_DIR/drasi-server.log" || true
     log "--- end drasi-server.log ---"
-    curl -sS "$url" > "$ARTIFACTS_DIR/final_reaction_state.json" 2>/dev/null || true
+    curl -sS "$url" > "$state_file" 2>/dev/null || true
     return 1
 }
 
+poll_all_reactions() {
+    local rc=0
+    local id
+    for id in $TEST_REACTION_IDS; do
+        if ! poll_until_stopped "$id"; then
+            rc=1
+        fi
+    done
+    return $rc
+}
+
 print_summary() {
-    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
+    local id state_file
+    for id in $TEST_REACTION_IDS; do
+        state_file="$ARTIFACTS_DIR/final_reaction_state__${id}.json"
 
-    echo "::group::Final reaction state"
-    if [[ -s "$state_file" ]]; then
-        jq '{
-            id: .id,
-            status: .reaction_observer.status,
-            handler_status: .reaction_observer.handler_status,
-            error_message: .reaction_observer.error_message,
-            result_summary: .reaction_observer.result_summary,
-            logger_results: .reaction_observer.logger_results
-        }' "$state_file" 2>/dev/null || cat "$state_file"
+        echo "::group::Final reaction state [$id]"
+        if [[ -s "$state_file" ]]; then
+            jq '{
+                id: .id,
+                status: .reaction_observer.status,
+                handler_status: .reaction_observer.handler_status,
+                error_message: .reaction_observer.error_message,
+                result_summary: .reaction_observer.result_summary,
+                logger_results: .reaction_observer.logger_results
+            }' "$state_file" 2>/dev/null || cat "$state_file"
 
-        local runtime invocations
-        runtime="$(jq -r '.reaction_observer.result_summary.observer_runtime_s // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
-        invocations="$(jq -r '.reaction_observer.result_summary.reaction_invocation_count // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
-        log "Observer runtime: $runtime  Reaction invocations: $invocations"
-    else
-        log "No final_reaction_state.json available"
-    fi
-    echo "::endgroup::"
+            local runtime invocations
+            runtime="$(jq -r '.reaction_observer.result_summary.observer_runtime_s // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+            invocations="$(jq -r '.reaction_observer.result_summary.reaction_invocation_count // "unknown"' "$state_file" 2>/dev/null || echo unknown)"
+            log "[$id] Observer runtime: $runtime  Reaction invocations: $invocations"
+        else
+            log "[$id] No final_reaction_state file available"
+        fi
+        echo "::endgroup::"
+    done
 
     echo "::group::Performance metrics output"
     local found=0
@@ -310,26 +331,35 @@ print_summary() {
     echo "::endgroup::"
 }
 
+# Resolve the expected SHA for a reaction id from the sidecar JSON file.
+# Missing file, missing key, or empty value all mean "no baseline" -> the
+# caller emits the actual SHA and treats the check as passing.
+expected_sha_for_reaction() {
+    local id="$1"
+    [[ -s "$EXPECTED_SHA_FILE" ]] || return 0
+    jq -r --arg id "$id" '.[$id] // ""' "$EXPECTED_SHA_FILE" 2>/dev/null
+}
+
 verify_deterministic_result() {
-    local state_file="$ARTIFACTS_DIR/final_reaction_state.json"
-    local jsonl_dir
-    local first_jsonl
-    local reaction_sha
+    # verify_deterministic_result <test_reaction_id>
+    local reaction_id="$1"
+    local state_file="$ARTIFACTS_DIR/final_reaction_state__${reaction_id}.json"
+    local jsonl_dir first_jsonl reaction_sha expected_sha
 
     if [[ ! -s "$state_file" ]]; then
-        log "WARNING: No final reaction state; skipping deterministic output hash"
+        log "WARNING: [$reaction_id] No final reaction state; skipping deterministic output hash"
         return 0
     fi
 
     jsonl_dir="$(jq -r '.reaction_observer.logger_results[]? | select(.logger_name == "JsonlFile" and .has_output == true) | .output_folder_path' "$state_file" | head -n1)"
     if [[ -z "$jsonl_dir" || ! -d "$jsonl_dir" ]]; then
-        log "WARNING: JsonlFile output folder not found from reaction state; skipping hash check"
+        log "WARNING: [$reaction_id] JsonlFile output folder not found from reaction state; skipping hash check"
         return 0
     fi
 
     first_jsonl="$(find "$jsonl_dir" -name '*.jsonl' -type f -print -quit)"
     if [[ -z "$first_jsonl" ]]; then
-        log "WARNING: No reaction JSONL files found in $jsonl_dir; skipping hash check"
+        log "WARNING: [$reaction_id] No reaction JSONL files found in $jsonl_dir; skipping hash check"
         return 0
     fi
 
@@ -342,23 +372,35 @@ verify_deterministic_result() {
         | sha256sum \
         | awk '{print $1}')"
     if [[ -z "$reaction_sha" ]]; then
-        log "WARNING: Failed to compute reaction output hash"
+        log "WARNING: [$reaction_id] Failed to compute reaction output hash"
         return 0
     fi
 
-    printf '%s\n' "$reaction_sha" > "$ARTIFACTS_DIR/reaction_output_sha256.txt"
-    printf '%s\n' "$jsonl_dir" > "$ARTIFACTS_DIR/reaction_output_jsonl_dir.txt"
-    log "Reaction output SHA-256: $reaction_sha"
+    printf '%s\n' "$reaction_sha" > "$ARTIFACTS_DIR/reaction_output_sha256__${reaction_id}.txt"
+    printf '%s\n' "$jsonl_dir"    > "$ARTIFACTS_DIR/reaction_output_jsonl_dir__${reaction_id}.txt"
+    log "[$reaction_id] Reaction output SHA-256: $reaction_sha"
 
-    if [[ -n "$EXPECTED_REACTION_SHA256" ]]; then
-        if [[ "$reaction_sha" != "$EXPECTED_REACTION_SHA256" ]]; then
-            log "ERROR: Determinism check failed. expected=$EXPECTED_REACTION_SHA256 actual=$reaction_sha"
+    expected_sha="$(expected_sha_for_reaction "$reaction_id")"
+    if [[ -n "$expected_sha" ]]; then
+        if [[ "$reaction_sha" != "$expected_sha" ]]; then
+            log "ERROR: [$reaction_id] Determinism check failed. expected=$expected_sha actual=$reaction_sha"
             return 1
         fi
-        log "Determinism check passed against EXPECTED_REACTION_SHA256"
+        log "[$reaction_id] Determinism check passed"
     else
-        log "No EXPECTED_REACTION_SHA256 provided; fingerprint emitted for baseline setup"
+        log "[$reaction_id] No expected SHA provided; fingerprint emitted for baseline setup"
     fi
+}
+
+verify_all_reactions() {
+    local rc=0
+    local id
+    for id in $TEST_REACTION_IDS; do
+        if ! verify_deterministic_result "$id"; then
+            rc=1
+        fi
+    done
+    return $rc
 }
 
 download_drasi_server
@@ -367,11 +409,11 @@ start_drasi_server
 start_test_service
 
 poll_rc=0
-poll_until_stopped || poll_rc=$?
+poll_all_reactions || poll_rc=$?
 print_summary
 
 determinism_rc=0
-verify_deterministic_result || determinism_rc=$?
+verify_all_reactions || determinism_rc=$?
 
 if (( poll_rc != 0 )); then
     exit "$poll_rc"

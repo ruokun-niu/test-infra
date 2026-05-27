@@ -1,0 +1,162 @@
+{
+  "data_store": {
+      "data_store_path": "./test_data_cache",
+      "delete_on_start": true,
+      "delete_on_stop": true,
+      "test_repos": [
+          {
+              "id": "drasi_server_dev_repo",
+              "kind": "LocalStorage",
+              "source_path": "./dev_repo",
+              "local_tests": [ 
+                  {
+                      "test_id": "building_comfort",
+                      "version": 1,
+                      "description": "",
+                      "test_folder": "building_comfort",
+                      "queries": [],
+                      "sources": [
+                        {
+                          "test_source_id": "facilities-db",
+                          "kind": "Model",
+                          "source_change_dispatchers": [ 
+                            {
+                              "kind": "Http",
+                              "url": "http://localhost",
+                              "port": 9000,
+                              "timeout_seconds": 60,
+                              "batch_events": false
+                            },
+                            {
+                              "kind": "JsonlFile",
+                              "max_lines_per_file": 15000
+                            }
+                          ],
+                          "model_data_generator": {
+                            "kind": "BuildingHierarchy",
+                            "change_interval": [2000000000, 500000000, 500000000, 4000000000],
+                            "change_count": 100000,
+                            "seed": 123456789,
+                            "spacing_mode": "none",
+                            "time_mode": "2025-01-03T10:03:15.4Z",
+                            "building_count": [1, 0],
+                            "floor_count": [3, 0],
+                            "room_count": [4, 0],                   
+                            "room_sensors": [
+                                {
+                                    "kind": "NormalFloat",
+                                    "id": "temperature",
+                                    "momentum_init": [5, 1, 0.5],
+                                    "value_change": [1, 0],
+                                    "value_init": [5000, 0],
+                                    "value_range": [0, 10000]
+                                },
+                                {
+                                    "kind": "NormalFloat",
+                                    "id": "co2",
+                                    "momentum_init": [10, 1, 0.5],
+                                    "value_change": [1, 0],
+                                    "value_init": [5000, 0],
+                                    "value_range": [0, 10000]
+                                },
+                                {
+                                    "kind": "NormalFloat",
+                                    "id": "humidity",
+                                    "momentum_init": [5, 1, 0.5],
+                                    "value_change": [1, 0],
+                                    "value_init": [5000, 0],
+                                    "value_range": [0, 10000]
+                                }
+                            ]
+                          },
+                          "subscribers": [
+                            { "node_id": "default", "query_id": "building-comfort" },
+                            { "node_id": "default", "query_id": "building-comfort-floor-agg" }
+                          ]
+                        }
+                      ],
+                      "reactions": [
+                        {
+                          "test_reaction_id": "building-comfort",
+                          "output_handler": {
+                            "kind": "Http",
+                            "port": 9001,
+                            "path": "/reaction",
+                            "correlation_header": "X-Query-Sequence"
+                          },
+                          "stop_triggers": [
+                            {
+                              "kind": "RecordCount",
+                              "record_count": 100000
+                            }
+                          ]
+                        },
+                        {
+                          "test_reaction_id": "building-comfort-floor-agg",
+                          "output_handler": {
+                            "kind": "Http",
+                            "port": 9002,
+                            "path": "/reaction",
+                            "correlation_header": "X-Query-Sequence"
+                          },
+                          "stop_triggers": [
+                            {
+                              "kind": "RecordCount",
+                              "record_count": 100000
+                            }
+                          ]
+                        }
+                      ]
+                    }                 
+              ]
+          }                    
+      ]
+  },
+  "test_run_host": {
+      "test_runs": [
+          {
+              "test_id": "building_comfort",
+              "test_repo_id": "drasi_server_dev_repo",
+              "test_run_id": "test_run_001",
+              "queries": [],
+              "reactions": [
+                  {
+                      "test_reaction_id": "building-comfort",
+                      "start_immediately": true,
+                      "output_loggers": [
+                          {
+                              "kind": "JsonlFile",
+                              "max_lines_per_file": 15000
+                          },
+                          {
+                              "kind": "PerformanceMetrics"
+                          }                      
+                      ]
+                  },
+                  {
+                      "test_reaction_id": "building-comfort-floor-agg",
+                      "start_immediately": true,
+                      "output_loggers": [
+                          {
+                              "kind": "JsonlFile",
+                              "max_lines_per_file": 15000
+                          },
+                          {
+                              "kind": "PerformanceMetrics"
+                          }                      
+                      ]
+                  }
+              ],
+              "sources": [
+                  {
+                      "test_source_id": "facilities-db",
+                      "start_mode": "auto",
+                      "test_run_overrides" : {
+                        "model_data_generator": {}
+                      }
+                  }
+              ]
+          }
+      ]
+  }
+}

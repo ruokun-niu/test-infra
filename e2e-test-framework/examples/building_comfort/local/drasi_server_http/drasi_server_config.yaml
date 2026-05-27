@@ -1,0 +1,117 @@
+# Drasi Server config for the building_comfort / drasi_server_http E2E test.
+#
+# The E2E test framework dispatches change events as HTTP webhooks to
+# http://localhost:9000 (kind=Http, port=9000) for source "facilities-db",
+# and runs two HTTP reaction handlers:
+#   - building-comfort               -> http://localhost:9001/reaction
+#   - building-comfort-floor-agg     -> http://localhost:9002/reaction
+#
+# Run from this folder using either:
+#   a) the prebuilt drasi-server binary (see
+#      https://drasi.io/drasi-server/how-to-guides/installation/download-binary/):
+#        <path/to>/bin/drasi-server --config drasi_server_config.yaml
+#   b) a checkout of the drasi-server repo:
+#        cargo run --release --manifest-path <path/to/drasi-server>/Cargo.toml -- --config drasi_server_config.yaml
+
+apiVersion: drasi.io/v1
+id: building-comfort-http
+host: "0.0.0.0"
+port: 8080
+logLevel: info
+persistConfig: false
+
+autoInstallPlugins: true
+# Disable cosign signature verification so locally-built plugins
+# (e.g. target/release/plugins/ when running via `cargo run` from a
+# drasi-server checkout) are loaded without a signed lockfile.
+verifyPlugins: false
+plugins:
+  - ref: source/http
+  - ref: reaction/http
+  - ref: reaction/log
+
+sources:
+  # HTTP webhook source receiving dispatched events from the test framework.
+  - kind: http
+    id: facilities-db
+    autoStart: true
+    host: "0.0.0.0"
+    port: 9000
+    timeoutMs: 60000
+
+queries:
+  - id: building-comfort
+    autoStart: true
+    queryLanguage: Cypher
+    sources:
+      - sourceId: facilities-db
+    query: |
+      MATCH (r:Room)
+      RETURN elementId(r) AS RoomId,
+             r.temperature AS Temperature,
+             r.humidity AS Humidity,
+             r.co2 AS Co2
+
+  # Floor-level aggregate: exercises a one-hop traversal across
+  # Floor -[:FLOOR_ROOM]-> Room plus avg / min / max / count aggregations.
+  - id: building-comfort-floor-agg
+    autoStart: true
+    queryLanguage: Cypher
+    sources:
+      - sourceId: facilities-db
+    query: |
+      MATCH (f:Floor)-[:FLOOR_ROOM]->(r:Room)
+      RETURN elementId(f)        AS FloorId,
+             avg(r.temperature)  AS AvgTemperature,
+             max(r.co2)          AS MaxCo2,
+             min(r.humidity)     AS MinHumidity,
+             count(r)            AS RoomCount
+
+reactions:
+  # HTTP webhook reaction posts per-room query results to the test
+  # framework's HttpReactionHandler at http://localhost:9001/reaction.
+  - kind: http
+    id: building-comfort-out
+    autoStart: true
+    queries:
+      - building-comfort
+    baseUrl: "http://localhost:9001"
+    timeoutMs: 60000
+    headers:
+      Content-Type: "application/json"
+      X-Query-Sequence: "building-comfort"
+    routes:
+      building-comfort:
+        added:
+          method: POST
+          url: "/reaction"
+        updated:
+          method: POST
+          url: "/reaction"
+        deleted:
+          method: POST
+          url: "/reaction"
+
+  # HTTP webhook reaction posts floor-aggregate query results to the test
+  # framework's HttpReactionHandler at http://localhost:9002/reaction.
+  - kind: http
+    id: building-comfort-floor-agg-out
+    autoStart: true
+    queries:
+      - building-comfort-floor-agg
+    baseUrl: "http://localhost:9002"
+    timeoutMs: 60000
+    headers:
+      Content-Type: "application/json"
+      X-Query-Sequence: "building-comfort-floor-agg"
+    routes:
+      building-comfort-floor-agg:
+        added:
+          method: POST
+          url: "/reaction"
+        updated:
+          method: POST
+          url: "/reaction"
+        deleted:
+          method: POST
+          url: "/reaction"

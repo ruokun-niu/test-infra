@@ -18,7 +18,7 @@
 
 @hostname = localhost
 @port = 63123
-@repo_id = local_dev_repo
+@repo_id = drasi_server_dev_repo
 @test_id = building_comfort
 @test_run_id = test_run_001
 @source_id = facilities-db

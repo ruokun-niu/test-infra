@@ -32,9 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      WORKDIR: e2e-test-framework/examples/building_comfort/drasi_server_http
+      WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_server_http
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
-      EXPECTED_REACTION_SHA256: ${{ vars.BUILDING_COMFORT_REACTION_SHA256 }}
+      # Expected per-reaction SHA-256 baselines live alongside the test in
+      # $WORKDIR/expected_reaction_sha256.json (version-controlled, reviewable
+      # in PRs). No repo variables required.
 
     steps:
       - name: Checkout

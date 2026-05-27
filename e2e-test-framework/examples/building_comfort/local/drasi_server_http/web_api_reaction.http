@@ -1,0 +1,77 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file is for use with the REST Client extension for Visual Studio Code to make it easy to manually 
+# test the Test Service Web API.
+# https://marketplace.visualstudio.com/items?itemName=humao.rest-client
+
+@hostname = localhost
+@port = 63123
+@repo_id = drasi_server_dev_repo
+@test_id = building_comfort
+@test_run_id = test_run_001
+@reaction_id = building-comfort
+
+### Homepage
+GET http://{{hostname}}:{{port}}
+
+### GET STATE of test run source
+GET http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}
+
+### START test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/start
+Content-Type: application/json
+
+### PAUSE test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/pause
+Content-Type: application/json
+
+### STEP test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/step
+Content-Type: application/json
+
+{
+  "num_steps": 1,
+  "spacing_mode": "None"
+}
+
+### SKIP test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/skip
+Content-Type: application/json
+
+{
+  "num_skips": 10000,
+  "spacing_mode": "none" 
+}
+
+### STOP test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/stop
+Content-Type: application/json
+
+### RESET test run source
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/reset
+Content-Type: application/json
+
+### BOOTSTRAP Data
+POST http://{{hostname}}:{{port}}/test_run_host/reactions/{{repo_id}}.{{test_id}}.{{test_run_id}}.{{reaction_id}}/bootstrap
+Content-Type: application/json
+
+{
+    "queryId": "continent-country-population",
+    "queryNodeId": "default",
+    "nodeLabels": ["Building"],
+    "nodeLabels_2": ["Building", "Floor"],
+    "nodeLabels_3": ["Building", "Floor", "Room"],
+    "relLabels": []
+}
