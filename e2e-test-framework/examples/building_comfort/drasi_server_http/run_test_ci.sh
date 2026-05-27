@@ -31,9 +31,13 @@
 #   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
 #                         Default: drasi_server_dev_repo.building_comfort.test_run_001
 #   TEST_REACTION_ID      Must match config.json. Default: building-comfort
+#   BUILDING_COMFORT_REACTION_SHA256
+#                         Pattern-specific expected SHA-256 fingerprint.
+#                         Preferred variable name for this test pattern.
 #   EXPECTED_REACTION_SHA256
 #                         Optional expected SHA-256 fingerprint of canonical
-#                         reaction JsonlFile output. If set, mismatch fails CI.
+#                         reaction JsonlFile output. Backward-compatible alias.
+#                         If either variable is set, mismatch fails CI.
 #   TIMEOUT_SECS          Max seconds to wait for Stopped state. Default: 1800
 #   POLL_INTERVAL_SECS    Seconds between status polls. Default: 10
 #   ARTIFACTS_DIR         Where to copy outputs. Default: ./ci_artifacts
@@ -51,7 +55,7 @@ DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
 TEST_REACTION_ID="${TEST_REACTION_ID:-building-comfort}"
-EXPECTED_REACTION_SHA256="${EXPECTED_REACTION_SHA256:-}"
+EXPECTED_REACTION_SHA256="${BUILDING_COMFORT_REACTION_SHA256:-${EXPECTED_REACTION_SHA256:-}}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-10}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$SCRIPT_DIR/ci_artifacts}"
