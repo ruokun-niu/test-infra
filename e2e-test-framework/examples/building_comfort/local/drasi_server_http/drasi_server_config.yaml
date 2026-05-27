@@ -61,11 +61,16 @@ queries:
       - sourceId: facilities-db
     query: |
       MATCH (f:Floor)-[:FLOOR_ROOM]->(r:Room)
-      RETURN elementId(f)        AS FloorId,
-             avg(r.temperature)  AS AvgTemperature,
-             max(r.co2)          AS MaxCo2,
-             min(r.humidity)     AS MinHumidity,
-             count(r)            AS RoomCount
+      WITH f,
+           avg(r.temperature) AS AvgTemperature,
+           max(r.co2)         AS MaxCo2,
+           min(r.humidity)    AS MinHumidity,
+           count(r)           AS RoomCount
+      RETURN elementId(f)     AS FloorId,
+             AvgTemperature,
+             MaxCo2,
+             MinHumidity,
+             RoomCount
 
 reactions:
   # HTTP webhook reaction posts per-room query results to the test
