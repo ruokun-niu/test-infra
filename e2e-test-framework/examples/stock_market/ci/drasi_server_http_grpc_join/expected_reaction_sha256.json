@@ -1,0 +1,4 @@
+{
+  "_comment": "Per-reaction expected SHA-256 fingerprints of the canonical JsonlFile reaction output. Keys must match test_reaction_id values from config.json. Empty string or missing key means 'no baseline yet'; the CI script will still emit the actual SHA to artifacts so the value can be filled in here. Once a value is set, mismatch fails CI.",
+  "watchlist-prices": ""
+}

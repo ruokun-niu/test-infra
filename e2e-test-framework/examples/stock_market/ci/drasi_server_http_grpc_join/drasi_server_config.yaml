@@ -1,0 +1,104 @@
+# Drasi Server config for the stock_market / drasi_server_http_grpc_join E2E test.
+#
+# Two sources feed a single Cypher query that performs a real cross-source
+# join keyed on `symbol`:
+#   - `stock-trades-db`  (HTTP webhook source on http://0.0.0.0:9000)
+#       -> fast StockTrade tick stream produced by the test framework's
+#          Model generator (Http dispatcher).
+#   - `watchlist-db`     (gRPC source on tcp://0.0.0.0:50051)
+#       -> slow-changing WatchlistItem stream produced by the test
+#          framework's Script source (Grpc dispatcher), seeded with 3
+#          symbols and edited every 3 seconds.
+#
+# The query `watchlist-prices` lists both sources under `sources:` and
+# returns only the stock prices for symbols currently in the watchlist:
+#     MATCH (s:Stock), (w:WatchlistItem)
+#     WHERE s.symbol = w.symbol
+#     RETURN ...
+#
+# Results are streamed via an HTTP reaction to the test framework's
+# HttpReactionHandler at http://localhost:9002/reaction.
+#
+# Run from this folder using either:
+#   a) the prebuilt drasi-server binary:
+#        <path/to>/bin/drasi-server --config drasi_server_config.yaml
+#   b) a checkout of the drasi-server repo:
+#        cargo run --release --manifest-path <path/to/drasi-server>/Cargo.toml -- --config drasi_server_config.yaml
+
+apiVersion: drasi.io/v1
+id: stock-market-watchlist-join
+host: "0.0.0.0"
+port: 8080
+logLevel: info
+persistConfig: false
+
+autoInstallPlugins: true
+# Disable cosign signature verification so locally-built plugins are loaded
+# without a signed lockfile.
+verifyPlugins: false
+plugins:
+  - ref: source/http
+  - ref: source/grpc
+  - ref: reaction/http
+  - ref: reaction/log
+
+sources:
+  # HTTP webhook source receiving the StockTrade tick stream.
+  - kind: http
+    id: stock-trades-db
+    autoStart: true
+    host: "0.0.0.0"
+    port: 9000
+    timeoutMs: 60000
+
+  # gRPC source receiving WatchlistItem inserts/updates/deletes.
+  - kind: grpc
+    id: watchlist-db
+    autoStart: true
+    host: "0.0.0.0"
+    port: 50051
+    timeoutMs: 60000
+
+queries:
+  # Real cross-source join: only emit prices for stocks that are in the
+  # watchlist. Reacts to BOTH stock ticks (price/volume updates) AND
+  # watchlist edits (add/remove/modify entries).
+  - id: watchlist-prices
+    autoStart: true
+    queryLanguage: Cypher
+    sources:
+      - sourceId: stock-trades-db
+      - sourceId: watchlist-db
+    query: |
+      MATCH (s:Stock), (w:WatchlistItem)
+      WHERE s.symbol = w.symbol
+      RETURN w.symbol   AS Symbol,
+             s.name     AS Name,
+             s.price    AS Price,
+             s.volume   AS Volume,
+             w.added_by AS AddedBy
+
+reactions:
+  # HTTP webhook reaction posts query results to the test framework's
+  # HttpReactionHandler at http://localhost:9002/reaction.
+  - kind: http
+    id: watchlist-prices-out
+    autoStart: true
+    queries:
+      - watchlist-prices
+    baseUrl: "http://localhost:9002"
+    timeoutMs: 60000
+    headers:
+      Content-Type: "application/json"
+      X-Query-Sequence: "watchlist-prices"
+    routes:
+      watchlist-prices:
+        added:
+          method: POST
+          url: "/reaction"
+        updated:
+          method: POST
+          url: "/reaction"
+        deleted:
+          method: POST
+          url: "/reaction"
