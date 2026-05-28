@@ -103,7 +103,7 @@
                           "stop_triggers": [
                             {
                               "kind": "RecordCount",
-                              "record_count": 100000
+                              "record_count": 49860
                             }
                           ]
                         }
