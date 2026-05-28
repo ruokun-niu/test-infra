@@ -145,13 +145,15 @@ fn convert_to_direct_format(event: &SourceChangeEvent) -> Option<HttpChangeEvent
             _ => "node",
         };
 
-        // Check if it's a relation by looking for from/to fields
+        // Internal SourceChangeEvent uses the CDC-style start_id/end_id.
+        // Translate to from/to which is drasi-server's HTTP source plugin
+        // DirectElement schema.
         let from = elem_value
-            .get("from")
+            .get("start_id")
             .and_then(|v| v.as_str())
             .map(String::from);
         let to = elem_value
-            .get("to")
+            .get("end_id")
             .and_then(|v| v.as_str())
             .map(String::from);
 

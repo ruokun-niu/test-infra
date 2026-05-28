@@ -659,9 +659,20 @@ impl BuildingHierarchyDataGeneratorInternalState {
             .unwrap()
             .as_nanos() as u64;
 
-        // Get all nodes and relations from current state
+        // Get all nodes and relations from current state. The iterator filters
+        // by included_types.contains(label), so we must list every label
+        // explicitly here — an empty HashSet means "include none", not "all".
         let building_graph = self.building_graph.lock().await;
-        let all_labels = HashSet::new(); // Empty set to get all elements
+        let all_labels: HashSet<String> = [
+            GraphElementType::BUILDING,
+            GraphElementType::FLOOR,
+            GraphElementType::ROOM,
+            GraphElementType::BUILDING_FLOOR,
+            GraphElementType::FLOOR_ROOM,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
         // Collect all insert events
         let mut insert_events = Vec::new();

@@ -39,6 +39,7 @@
                             "seed": 123456789,
                             "spacing_mode": "none",
                             "time_mode": "2025-01-03T10:03:15.4Z",
+                            "send_initial_inserts": true,
                             "building_count": [1, 0],
                             "floor_count": [3, 0],
                             "room_count": [4, 0],                   

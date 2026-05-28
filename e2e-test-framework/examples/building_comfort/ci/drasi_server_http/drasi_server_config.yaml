@@ -54,6 +54,7 @@ queries:
 
   # Floor-level aggregate: exercises a one-hop traversal across
   # Floor -[:FLOOR_ROOM]-> Room plus avg / min / max / count aggregations.
+      
   - id: building-comfort-floor-agg
     autoStart: true
     queryLanguage: Cypher
@@ -71,6 +72,7 @@ queries:
              MaxCo2,
              MinHumidity,
              RoomCount
+
 
 reactions:
   # HTTP webhook reaction posts per-room query results to the test
