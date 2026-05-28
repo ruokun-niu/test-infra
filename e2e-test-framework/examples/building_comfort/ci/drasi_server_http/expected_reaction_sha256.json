@@ -1,5 +1,5 @@
 {
   "_comment": "Per-reaction expected SHA-256 fingerprints of the canonical JsonlFile reaction output. Keys must match test_reaction_id values from config.json. Empty string or missing key means 'no baseline yet'; the CI script will still emit the actual SHA to artifacts so the value can be filled in here. Once a value is set, mismatch fails CI.",
-  "building-comfort": "",
-  "building-comfort-floor-agg": ""
+  "building-comfort": "71ac6eba21fec837d2145dca6603812c0795b1fc713139b9c99136db0c806b51",
+  "building-comfort-floor-agg": "0162693d42554af54254dd1b74070efa9a1f21cfdf8340fc40f8d4a80cea2c25"
 }
