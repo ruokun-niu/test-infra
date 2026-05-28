@@ -84,7 +84,13 @@
                             "port": 9001,
                             "path": "/reaction",
                             "correlation_header": "X-Query-Sequence"
-                          }
+                          },
+                          "stop_triggers": [
+                            {
+                              "kind": "RecordCount",
+                              "record_count": 99981
+                            }
+                          ]
                         },
                         {
                           "test_reaction_id": "building-comfort-floor-agg",
@@ -93,13 +99,13 @@
                             "port": 9002,
                             "path": "/reaction",
                             "correlation_header": "X-Query-Sequence"
-                          }
-                        }
-                      ],
-                      "completion_handlers": [
-                        {
-                          "kind": "Log",
-                          "log_level": "info"
+                          },
+                          "stop_triggers": [
+                            {
+                              "kind": "RecordCount",
+                              "record_count": 49860
+                            }
+                          ]
                         }
                       ]
                     }                 

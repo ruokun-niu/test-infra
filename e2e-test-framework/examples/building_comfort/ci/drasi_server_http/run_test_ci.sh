@@ -15,8 +15,7 @@
 #   2. Patch the example configs so the run is CI-safe (port collision, keep
 #      artifacts on shutdown).
 #   3. Start drasi-server and the test-service as background processes.
-#   4. Wait for source generator completion via test-service API.
-#   5. Stop the test run via API, then verify reactions reached Stopped.
+#   4. Poll the test-service REST API until each reaction reaches Stopped.
 #   5. Tear down both processes and copy artifacts to $ARTIFACTS_DIR.
 #
 # Required tools: bash, jq, curl, tar/unzip, cargo. Either `gh` (preferred)
@@ -31,9 +30,6 @@
 #   TEST_SERVICE_PORT     test-service REST API port. Default: 63123
 #   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
 #                         Default: drasi_server_dev_repo.building_comfort.test_run_001
-#   TEST_SOURCE_IDS       Space-separated list of test_source_id values to poll
-#                         until SourceChangeGenerator status=Finished.
-#                         Default: "facilities-db"
 #   TEST_REACTION_IDS     Space-separated list of test_reaction_id values to
 #                         poll until Stopped and to hash for determinism.
 #                         Default: "building-comfort building-comfort-floor-agg"
@@ -61,7 +57,6 @@ DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
 DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-9000}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
-TEST_SOURCE_IDS="${TEST_SOURCE_IDS:-facilities-db}"
 TEST_REACTION_IDS="${TEST_REACTION_IDS:-building-comfort building-comfort-floor-agg}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
 POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-10}"
@@ -296,92 +291,6 @@ poll_all_reactions() {
     return $rc
 }
 
-poll_until_source_finished() {
-    # poll_until_source_finished <test_source_id>
-    # Writes final state to $ARTIFACTS_DIR/final_source_state__<id>.json on Finished/Error.
-    local source_id="$1"
-    local state_file="$ARTIFACTS_DIR/final_source_state__${source_id}.json"
-    local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/sources/${source_id}"
-    log "Polling source [$source_id] $url (timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s)"
-    local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
-    local start_ts=$(( $(date +%s) ))
-    local last_log_ts=0
-
-    while (( $(date +%s) < deadline )); do
-        if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
-            log "ERROR: test-service exited unexpectedly"
-            return 1
-        fi
-        if ! kill -0 "$DRASI_PID" 2>/dev/null; then
-            log "ERROR: drasi-server exited unexpectedly"
-            return 1
-        fi
-
-        local http_code body status now elapsed
-        http_code="$(curl -sS -o /tmp/poll_source_body.$$ -w '%{http_code}' "$url" 2>/dev/null || echo '000')"
-        body="$(cat /tmp/poll_source_body.$$ 2>/dev/null || true)"
-        rm -f /tmp/poll_source_body.$$
-
-        status="Unknown"
-        if [[ "$http_code" == "200" && -n "$body" ]]; then
-            status="$(echo "$body" | jq -r '.source_change_generator.status // "Unknown"')"
-        fi
-
-        now=$(date +%s)
-        elapsed=$(( now - start_ts ))
-        if (( now - last_log_ts >= 30 )); then
-            log "poll source [$source_id] t=${elapsed}s http=${http_code} status=${status}"
-            last_log_ts=$now
-        fi
-
-        if [[ "$status" == "Finished" ]]; then
-            echo "$body" > "$state_file"
-            log "[$source_id] reached Finished state"
-            return 0
-        fi
-
-        if [[ "$status" == "Error" ]]; then
-            echo "$body" > "$state_file"
-            log "ERROR: [$source_id] entered Error state"
-            return 1
-        fi
-
-        sleep "$POLL_INTERVAL_SECS"
-    done
-
-    log "ERROR: [$source_id] did not complete within ${TIMEOUT_SECS}s"
-    curl -sS "$url" > "$state_file" 2>/dev/null || true
-    return 1
-}
-
-poll_all_sources_finished() {
-    local rc=0
-    local id
-    for id in $TEST_SOURCE_IDS; do
-        if ! poll_until_source_finished "$id"; then
-            rc=1
-        fi
-    done
-    return $rc
-}
-
-stop_test_run_via_api() {
-    local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/stop"
-    local http_code
-    http_code="$(curl -sS -o /tmp/stop_run_body.$$ -w '%{http_code}' -X POST "$url" 2>/dev/null || echo '000')"
-    local body
-    body="$(cat /tmp/stop_run_body.$$ 2>/dev/null || true)"
-    rm -f /tmp/stop_run_body.$$
-
-    if [[ "$http_code" != "200" ]]; then
-        log "ERROR: Failed to stop test run via API (http=$http_code body=${body:-<empty>})"
-        return 1
-    fi
-
-    log "Test run stop requested via API"
-    return 0
-}
-
 print_summary() {
     local id state_file
     for id in $TEST_REACTION_IDS; do
@@ -499,12 +408,6 @@ patch_configs
 start_drasi_server
 start_test_service
 
-completion_rc=0
-poll_all_sources_finished || completion_rc=$?
-if (( completion_rc == 0 )); then
-    stop_test_run_via_api || completion_rc=$?
-fi
-
 poll_rc=0
 poll_all_reactions || poll_rc=$?
 print_summary
@@ -514,10 +417,6 @@ verify_all_reactions || determinism_rc=$?
 
 if (( poll_rc != 0 )); then
     exit "$poll_rc"
-fi
-
-if (( completion_rc != 0 )); then
-    exit "$completion_rc"
 fi
 
 if (( determinism_rc != 0 )); then
