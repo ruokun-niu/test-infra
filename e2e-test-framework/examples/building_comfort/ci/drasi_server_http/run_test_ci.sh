@@ -364,11 +364,15 @@ verify_deterministic_result() {
     fi
 
     # Hash only canonical reaction payload content (not timestamps/trace metadata)
-    # so equal seeded runs are compared on actual result data.
+    # so equal seeded runs are compared on actual result data. We also sort the
+    # extracted payload lines so the hash is order-independent — tests with
+    # multiple async sources (e.g. HTTP + gRPC) can interleave reaction rows
+    # in different orders run-to-run even with deterministic inputs.
     reaction_sha="$(find "$jsonl_dir" -name '*.jsonl' -type f -print0 \
         | sort -z \
         | xargs -0 cat \
         | jq -cS 'if .payload.type == "ReactionInvocation" then .payload.request_body elif .payload.type == "ReactionOutput" then .payload.reaction_output else .payload end' \
+        | LC_ALL=C sort \
         | sha256sum \
         | awk '{print $1}')"
     if [[ -z "$reaction_sha" ]]; then
