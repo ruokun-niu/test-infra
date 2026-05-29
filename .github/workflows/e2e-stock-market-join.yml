@@ -1,0 +1,92 @@
+# Scheduled E2E test: stock_market stocks-watchlist join (HTTP + gRPC sources)
+# against an external drasi-server.
+#
+# Each test pattern lives in its own example folder and exposes a
+# `run_test_ci.sh` that downloads the drasi-server release binary,
+# orchestrates the run, and writes artifacts to $ARTIFACTS_DIR. This workflow
+# just sets env vars and invokes that script. To add another pattern, copy
+# this job and point WORKDIR at the new example folder.
+
+name: E2E - stock_market join
+
+on:
+  workflow_dispatch:
+    inputs:
+      drasi_server_version:
+        description: "drasi-server release tag (e.g. v0.1.5). Empty = latest."
+        required: false
+        default: ""
+      timeout_minutes:
+        description: "Max minutes to wait for the test to finish."
+        required: false
+        default: "30"
+  schedule:
+    # 07:15 UTC daily (offset from building_comfort).
+    - cron: "15 7 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  stock-market-drasi-server-http-grpc-join:
+    name: stock_market / drasi_server_http_grpc_join
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      WORKDIR: e2e-test-framework/examples/stock_market/ci/drasi_server_http_grpc_join
+      DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
+      # Expected per-reaction SHA-256 baselines live alongside the test in
+      # $WORKDIR/expected_reaction_sha256.json (version-controlled, reviewable
+      # in PRs). No repo variables required.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: e2e-test-framework
+
+      - name: Install runtime deps (jq, curl)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq curl
+
+      # test-run-host enables drasi-core's `middleware-jq` feature, which
+      # pulls in jq-sys; jq-sys links against the system libjq + libonig.
+      # Mirror lint.yml / drasi-server's Dockerfile.
+      - name: Install build deps for libjq
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libjq-dev libonig-dev \
+            libprotobuf-dev protobuf-compiler cmake clang libclang-dev
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=$(dirname $(find /usr/lib -name 'libjq.so' | head -1))" >> "$GITHUB_ENV"
+
+      - name: Compute timeout (seconds)
+        run: |
+          mins="${{ inputs.timeout_minutes }}"
+          [[ -z "$mins" ]] && mins=30
+          echo "TIMEOUT_SECS=$(( mins * 60 ))" >> "$GITHUB_ENV"
+
+      - name: Build test-service
+        working-directory: e2e-test-framework
+        run: cargo build --release --manifest-path test-service/Cargo.toml
+
+      - name: Run scheduled test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
+          WORK_DIR: ${{ runner.temp }}/ci_work
+        run: bash "${WORKDIR}/run_test_ci.sh"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock_market-drasi_server_http_grpc_join
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: warn
