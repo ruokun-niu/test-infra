@@ -25,7 +25,7 @@
                                       "url": "http://localhost",
                                       "port": 9000,
                                       "timeout_seconds": 60,
-                                      "batch_events": false
+                                      "batch_events": true
                                   },
                                   {
                                       "kind": "JsonlFile",
@@ -54,8 +54,8 @@
                                   "volume_change": [100000, 50000.0],
                                   "volume_momentum": [3, 1.5, 0.4],
                                   "volume_range": [1000, 100000000],
-                                  "change_count": 2000,
-                                  "change_interval": [15000000, 3000000, 5000000, 30000000],
+                                  "change_count": 100000,
+                                  "change_interval": [200000, 50000, 100000, 500000],
                                   "spacing_mode": "recorded",
                                   "time_mode": "live",
                                   "seed": 123456789,
@@ -107,7 +107,7 @@
                               "stop_triggers": [
                                   {
                                       "kind": "RecordCount",
-                                      "record_count": 100
+                                      "record_count": 75000
                                   }
                               ]
                           }

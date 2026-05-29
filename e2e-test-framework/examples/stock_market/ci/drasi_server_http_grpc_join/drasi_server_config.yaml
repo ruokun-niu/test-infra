@@ -1,20 +1,20 @@
 # Drasi Server config for the stock_market / drasi_server_http_grpc_join E2E test.
 #
-# Two sources feed a single Cypher query that performs a real cross-source
-# join keyed on `symbol`:
+# Two sources feed a single Cypher query that performs a cross-source
+# join via a Drasi synthetic relationship (no relation events in the data):
 #   - `stock-trades-db`  (HTTP webhook source on http://0.0.0.0:9000)
 #       -> fast StockTrade tick stream produced by the test framework's
 #          Model generator (Http dispatcher).
 #   - `watchlist-db`     (gRPC source on tcp://0.0.0.0:50051)
 #       -> slow-changing WatchlistItem stream produced by the test
-#          framework's Script source (Grpc dispatcher), seeded with 3
-#          symbols and edited every 3 seconds.
+#          framework's Script source (Grpc dispatcher).
 #
-# The query `watchlist-prices` lists both sources under `sources:` and
-# returns only the stock prices for symbols currently in the watchlist:
-#     MATCH (s:Stock), (w:WatchlistItem)
-#     WHERE s.symbol = w.symbol
-#     RETURN ...
+# The query `watchlist-prices` declares a synthetic `:WATCHES` relation
+# between any `WatchlistItem` and `Stock` that share the same `symbol`
+# property (see `joins:` below). Drasi materializes this virtual edge
+# across the two sources without any schema changes or relation events,
+# so the Cypher pattern `MATCH (w:WatchlistItem)-[:WATCHES]->(s:Stock)`
+# returns only the stock prices for watchlisted symbols.
 #
 # Results are streamed via an HTTP reaction to the test framework's
 # HttpReactionHandler at http://localhost:9002/reaction.
@@ -29,7 +29,7 @@ apiVersion: drasi.io/v1
 id: stock-market-watchlist-join
 host: "0.0.0.0"
 port: 8080
-logLevel: debug
+logLevel: info
 persistConfig: false
 
 autoInstallPlugins: true
@@ -60,8 +60,11 @@ sources:
     timeoutMs: 60000
 
 queries:
-  # Real cross-source join: only emit prices for stocks that are in the
-  # watchlist. Reacts to BOTH stock ticks (price/volume updates) AND
+  # Cross-source synthetic join: only emit prices for stocks that are in
+  # the watchlist. The `joins:` block below tells drasi-server to create
+  # a virtual :WATCHES edge between any WatchlistItem (from watchlist-db)
+  # and any Stock (from stock-trades-db) that share the same `symbol`.
+  # The query reacts to both stock ticks (price/volume updates) AND
   # watchlist edits (add/remove/modify entries).
   - id: watchlist-prices
     autoStart: true
@@ -69,10 +72,10 @@ queries:
     sources:
       - sourceId: stock-trades-db
       - sourceId: watchlist-db
-    # Synthetic cross-source join: drasi-server creates a virtual :WATCHES
-    # relation between any WatchlistItem and Stock that share the same
-    # `symbol` property, even though the two nodes come from different
-    # sources. No relation events need to be dispatched.
+    # Drasi materializes a virtual :WATCHES edge between any WatchlistItem
+    # and Stock that share the same `symbol` property, even though the
+    # two nodes come from different sources. No relation events are
+    # dispatched by either source; the join is purely query-side.
     joins:
       - id: WATCHES
         keys:
