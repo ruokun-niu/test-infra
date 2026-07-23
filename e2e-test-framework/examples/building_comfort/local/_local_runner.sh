@@ -34,10 +34,85 @@
 #   DRASI_SERVER_VERSION unset (default)    tag to download (else: latest)
 #   DRASI_REPO           drasi-project/drasi-server
 #   DRASI_TARGET         auto-detected      e.g. aarch64-apple-darwin
+#   DRASI_INDEX          memory (default) | rocksdb    query index backend.
+#                                           `rocksdb` patches `persistIndex: true`
+#                                           into a temp copy of the drasi-server
+#                                           config and clears ./data for a clean
+#                                           cold start. `memory` runs as-is.
+#                                           (drasi-server only compiles in these
+#                                           two backends; Redis indexes exist
+#                                           only on the Drasi Platform path.)
 #   SHA_CHECK            1 | 0 (default)    patch SHA-256 logger + handler in
 #   TIMEOUT_SECS         1800               max seconds to wait for Stopped
 #   POLL_INTERVAL_SECS   5                  seconds between status polls
 #   TEST_SERVICE_PORT    63123              test-service REST API port
+
+# Select the drasi-server query index backend based on $DRASI_INDEX.
+#
+# For `memory` (default) the original drasi_server_config.yaml is used as-is.
+# For `rocksdb` we write a temp copy with `persistIndex: true` inserted after
+# the `persistConfig:` line (drasi-server registers its built-in RocksDB index
+# provider as the instance default when persistIndex is true) and wipe the
+# variant's ./data directory so each run is a deterministic cold start.
+#
+# Args:
+#   $1  path to the source drasi_server_config.yaml
+#   $2  variant directory (drasi-server cwd; where ./data is materialized)
+# Sets:
+#   DRASI_CONFIG_PATH             config path drasi-server should load
+#   _LOCAL_RUNNER_TMP_DRASI_CFG   temp file to clean up (when patched)
+prepare_drasi_index_config() {
+    local original="$1"
+    local variant_dir="$2"
+    local backend="${DRASI_INDEX:-memory}"
+    DRASI_CONFIG_PATH="$original"
+
+    case "$backend" in
+        memory)
+            echo "[local] DRASI_INDEX=memory: using in-memory query indexes" >&2
+            return 0
+            ;;
+        rocksdb)
+            ;;
+        *)
+            echo "[local] DRASI_INDEX='$backend' is not supported (use memory|rocksdb)" >&2
+            return 1
+            ;;
+    esac
+
+    if grep -qE '^persistIndex:' "$original"; then
+        # Config already pins persistIndex; respect it and only clean ./data.
+        echo "[local] DRASI_INDEX=rocksdb: config already sets persistIndex; leaving as-is" >&2
+    else
+        local tmp
+        tmp="$(mktemp -t bc-local-drasi-cfg.XXXXXX)"
+        # Insert `persistIndex: true` right after the persistConfig line
+        # (awk keeps this portable across BSD/GNU without newline quoting).
+        if grep -qE '^persistConfig:' "$original"; then
+            awk '{ print } /^persistConfig:/ { print "persistIndex: true" }' \
+                "$original" > "$tmp"
+        else
+            # No persistConfig anchor; append the setting at the end.
+            cat "$original" > "$tmp"
+            printf '\npersistIndex: true\n' >> "$tmp"
+        fi
+        if ! grep -qE '^persistIndex: true' "$tmp"; then
+            echo "[local] failed to patch persistIndex into drasi-server config" >&2
+            rm -f "$tmp"
+            return 1
+        fi
+        DRASI_CONFIG_PATH="$tmp"
+        _LOCAL_RUNNER_TMP_DRASI_CFG="$tmp"
+        echo "[local] DRASI_INDEX=rocksdb: patched persistIndex: true (config -> $tmp)" >&2
+    fi
+
+    # Clean any previous RocksDB index / WAL so the run is a cold start.
+    if [[ -d "$variant_dir/data" ]]; then
+        echo "[local] DRASI_INDEX=rocksdb: clearing $variant_dir/data for a clean cold start" >&2
+        rm -rf "$variant_dir/data"
+    fi
+    return 0
+}
 
 prepare_sha_config() {
     local original="$1"
@@ -278,10 +353,15 @@ run_local_test_autoexit() {
         if ! _local_runner_prepare_drasi_server_bin "$variant_dir"; then
             return 1
         fi
+        # Select the query index backend (memory|rocksdb); may produce a temp
+        # patched config in DRASI_CONFIG_PATH and wipe $variant_dir/data.
+        if ! prepare_drasi_index_config "$ds_yaml" "$variant_dir"; then
+            return 1
+        fi
         ds_log="$(mktemp -t bc-local-drasi.XXXXXX)"
         (
             cd "$variant_dir"
-            exec "$DRASI_SERVER_BIN" --config "$ds_yaml" >"$ds_log" 2>&1
+            exec "$DRASI_SERVER_BIN" --config "$DRASI_CONFIG_PATH" >"$ds_log" 2>&1
         ) &
         ds_pid=$!
         echo "[local] drasi-server pid=$ds_pid; log=$ds_log" >&2
@@ -334,6 +414,7 @@ run_local_test_autoexit() {
             kill -KILL "$ds_pid" 2>/dev/null
         fi
         [[ -n "${_LOCAL_RUNNER_TMP_CONFIG:-}" ]] && rm -f "$_LOCAL_RUNNER_TMP_CONFIG"
+        [[ -n "${_LOCAL_RUNNER_TMP_DRASI_CFG:-}" ]] && rm -f "$_LOCAL_RUNNER_TMP_DRASI_CFG"
     }
     trap _local_runner_cleanup EXIT INT TERM
 

@@ -27,6 +27,11 @@
 #   DRASI_SERVER_BIN      Pre-downloaded binary; skips the download step.
 #   DRASI_ADMIN_PORT      Admin port to patch into drasi_server_config.yaml. Default: 8090
 #   DRASI_SOURCE_PORT     gRPC source port. Default: 50051
+#   DRASI_INDEX           Query index backend: memory (default) | rocksdb.
+#                         `rocksdb` patches `persistIndex: true` into the CI
+#                         drasi-server config and clears ./data for a clean
+#                         cold start. (drasi-server only compiles in these two
+#                         backends; Redis indexes exist only on the Platform.)
 #   TEST_SERVICE_PORT     test-service REST API port. Default: 63123
 #   TEST_RUN_ID           Full run id used by the API: test_repo_id.test_id.test_run_id
 #                         Default: drasi_server_dev_repo.building_comfort.test_run_001
@@ -50,6 +55,7 @@ DRASI_REPO="${DRASI_REPO:-drasi-project/drasi-server}"
 DRASI_SERVER_VERSION="${DRASI_SERVER_VERSION:-}"
 DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
 DRASI_SOURCE_PORT="${DRASI_SOURCE_PORT:-50051}"
+DRASI_INDEX="${DRASI_INDEX:-memory}"
 TEST_SERVICE_PORT="${TEST_SERVICE_PORT:-63123}"
 TEST_RUN_ID="${TEST_RUN_ID:-drasi_server_dev_repo.building_comfort.test_run_001}"
 TEST_REACTION_IDS="${TEST_REACTION_IDS:-building-comfort building-comfort-floor-agg}"
@@ -157,6 +163,35 @@ patch_configs() {
     log "Patching drasi_server_config.yaml admin port -> $DRASI_ADMIN_PORT"
     sed -E "s/^port:[[:space:]]*8080\$/port: ${DRASI_ADMIN_PORT}/" "$DRASI_CFG_SRC" > "$DRASI_CFG_CI"
     grep -E '^(host|port):' "$DRASI_CFG_CI"
+
+    log "Selecting query index backend -> $DRASI_INDEX"
+    case "$DRASI_INDEX" in
+        memory)
+            log "Index backend: memory (in-memory query indexes)"
+            ;;
+        rocksdb)
+            if grep -qE '^persistIndex:' "$DRASI_CFG_CI"; then
+                log "Index backend: rocksdb (config already sets persistIndex)"
+            elif grep -qE '^persistConfig:' "$DRASI_CFG_CI"; then
+                awk '{ print } /^persistConfig:/ { print "persistIndex: true" }' \
+                    "$DRASI_CFG_CI" > "${DRASI_CFG_CI}.tmp" && mv "${DRASI_CFG_CI}.tmp" "$DRASI_CFG_CI"
+            else
+                printf '\npersistIndex: true\n' >> "$DRASI_CFG_CI"
+            fi
+            if ! grep -qE '^persistIndex: true' "$DRASI_CFG_CI"; then
+                log "ERROR: failed to patch persistIndex into $DRASI_CFG_CI"
+                return 1
+            fi
+            log "Index backend: rocksdb (persistIndex: true)"
+            grep -E '^persistIndex:' "$DRASI_CFG_CI"
+            # Cold start: clear any RocksDB index / redb WAL from a prior run.
+            rm -rf "$SCRIPT_DIR/data"
+            ;;
+        *)
+            log "ERROR: DRASI_INDEX='$DRASI_INDEX' not supported (use memory|rocksdb)"
+            return 1
+            ;;
+    esac
 
     log "Patching config.json: delete_on_start/stop=false, data_store_path=$DATA_CACHE"
     jq --arg cache "$DATA_CACHE" \
@@ -396,6 +431,7 @@ write_step_summary() {
         echo
         echo "- drasi-server tag: \`$drasi_version\`"
         echo "- drasi-server binary: \`$server_version\`"
+        echo "- index backend: \`$DRASI_INDEX\`"
         echo
 
         echo "### Reactions"

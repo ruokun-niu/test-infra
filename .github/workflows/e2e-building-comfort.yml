@@ -22,6 +22,15 @@ on:
         description: "Max minutes to wait for the test to finish."
         required: false
         default: "30"
+      index_backend:
+        description: "Query index backend(s) to run against the drasi-server jobs."
+        required: false
+        type: choice
+        options:
+          - both
+          - memory
+          - rocksdb
+        default: both
   schedule:
     # 07:00 UTC daily.
     - cron: "0 7 * * *"
@@ -30,17 +39,46 @@ permissions:
   contents: read
 
 jobs:
+  # Resolve which index backends the drasi-server jobs run against. Scheduled
+  # runs (and the "both" dispatch default) exercise memory + rocksdb; a manual
+  # run can narrow this to a single backend. drasi-server only compiles in the
+  # in-memory and RocksDB index backends, so those are the only valid values.
+  setup:
+    name: Resolve index-backend matrix
+    runs-on: ubuntu-latest
+    outputs:
+      indexes: ${{ steps.compute.outputs.indexes }}
+    steps:
+      - name: Compute matrix
+        id: compute
+        run: |
+          sel="${{ inputs.index_backend }}"
+          [[ -z "$sel" ]] && sel=both
+          case "$sel" in
+            memory)  echo 'indexes=["memory"]' >> "$GITHUB_OUTPUT" ;;
+            rocksdb) echo 'indexes=["rocksdb"]' >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'indexes=["memory","rocksdb"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
   building-comfort-drasi-server-http:
-    name: building_comfort / drasi_server_http
+    name: building_comfort / drasi_server_http (${{ matrix.index }})
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        index: ${{ fromJSON(needs.setup.outputs.indexes) }}
     env:
       WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_server_http
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
+      DRASI_INDEX: ${{ matrix.index }}
       # Determinism baselines live inline in $WORKDIR/config.json under the
       # Sha256Determinism completion handler's `expected` map. The framework
       # flips the test-run status to Error on mismatch; the runner script
-      # surfaces that via the test-service REST API.
+      # surfaces that via the test-service REST API. Query results are
+      # index-backend independent, so the same baseline verifies memory and
+      # rocksdb produce identical output.
 
     steps:
       - name: Checkout
@@ -90,22 +128,29 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: building_comfort-drasi_server_http
+          name: building_comfort-drasi_server_http-${{ matrix.index }}
           path: ${{ runner.temp }}/artifacts
           if-no-files-found: warn
 
   building-comfort-drasi-server-grpc:
-    name: building_comfort / drasi_server_grpc
+    name: building_comfort / drasi_server_grpc (${{ matrix.index }})
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        index: ${{ fromJSON(needs.setup.outputs.indexes) }}
     env:
       WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_server_grpc
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
+      DRASI_INDEX: ${{ matrix.index }}
       # Determinism baselines live inline in $WORKDIR/config.json under the
       # Sha256Determinism completion handler's `expected` map. First run
       # uses missing_baseline=Warn so the framework just logs the actual
       # SHAs; lock them in by copying into `expected` and flipping the
-      # policy to Fail.
+      # policy to Fail. Query results are index-backend independent, so the
+      # same baseline verifies memory and rocksdb produce identical output.
 
     steps:
       - name: Checkout
@@ -155,7 +200,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: building_comfort-drasi_server_grpc
+          name: building_comfort-drasi_server_grpc-${{ matrix.index }}
           path: ${{ runner.temp }}/artifacts
           if-no-files-found: warn
 

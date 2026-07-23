@@ -1,6 +1,14 @@
 /scratch
 **/test_data_cache/
 
+# drasi-server on-disk artifacts (RocksDB query index + redb WAL) written into
+# the example folder used as the drasi-server working directory (DRASI_INDEX=rocksdb).
+**/examples/**/data/
+
+# CI runner scratch + copied artifacts (examples/*/ci/*/run_test_ci.sh)
+**/.ci_work/
+**/ci_artifacts/
+
 *.log
 
 target/

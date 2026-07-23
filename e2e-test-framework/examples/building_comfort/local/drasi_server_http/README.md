@@ -104,6 +104,31 @@ baseline. To enforce a baseline locally, paste the SHAs into a
 `Sha256Determinism` block in `config.json` directly (see the CI variant's
 `config.json` for the exact shape).
 
+### Optional: query index backend (`DRASI_INDEX`)
+
+By default the query runs against Drasi Server's **in-memory** index. Set
+`DRASI_INDEX` to pick the backend the auto-launched drasi-server uses:
+
+```bash
+# In-memory indexes (default).
+DRASI_INDEX=memory ./run_test.sh
+
+# Persistent RocksDB indexes. The runner patches `persistIndex: true` into a
+# temporary copy of drasi_server_config.yaml (the checked-in file is not
+# modified) and clears ./data first for a clean cold start.
+DRASI_INDEX=rocksdb ./run_test.sh
+```
+
+With `rocksdb`, drasi-server materializes its index under `./data/<id>/index`
+in this folder (git-ignored). Query results are identical across backends, so
+running both with `SHA_CHECK=1` and comparing the per-reaction SHAs verifies
+that memory and rocksdb produce the same output.
+
+> **Note:** `memory` and `rocksdb` are the only index backends compiled into
+> the drasi-server binary. Redis-backed indexes exist only on the Kubernetes
+> Drasi Platform path (`local/drasi_platform/query_container_redis/`), not for
+> the binary, so they are out of scope here.
+
 ## Inspect / control while running
 
 The test service exposes a REST API on `http://localhost:8080`. The
