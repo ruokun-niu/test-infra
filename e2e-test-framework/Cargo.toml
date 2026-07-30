@@ -45,3 +45,17 @@ lto = true
 # drasi-bootstrap-application = { path = "../../drasi-core/components/bootstrappers/application" }
 # drasi-reaction-application = { path = "../../drasi-core/components/reactions/application" }
 # drasi-source-application = { path = "../../drasi-core/components/sources/application" }
+#
+# CI / branch testing: to run the embedded drasi-lib (drasi_lib) variant against
+# a branch or fork of drasi-core, use git patches instead of paths and commit
+# them to your branch. The scheduled workflow (or a workflow_dispatch run against
+# your branch) then builds the test-service with these overrides. Set `branch`
+# (or `rev`/`tag`) and `git` (a fork URL to test a fork). The referenced crate
+# versions must stay semver-compatible with what the workspace requires.
+# [patch.crates-io]
+# drasi-core = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }
+# drasi-lib = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }
+# drasi-bootstrap-noop = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }
+# drasi-bootstrap-application = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }
+# drasi-reaction-application = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }
+# drasi-source-application = { git = "https://github.com/drasi-project/drasi-core", branch = "my-branch" }

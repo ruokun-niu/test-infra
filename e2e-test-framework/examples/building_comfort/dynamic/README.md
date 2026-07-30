@@ -142,6 +142,26 @@ export WORK_DIR="$PWD/.local_run/work"
 On CI/Linux the driver downloads `drasi-server-x86_64-linux-gnu` automatically
 (override with `DRASI_SERVER_VERSION` / `DRASI_TARGET`).
 
+### Testing against a drasi-server branch (build from source)
+
+To validate an unreleased drasi-server change (e.g. a RocksDB perf fix), set
+`DRASI_SERVER_REF` to a branch, tag, or commit SHA. The driver clones
+`DRASI_REPO` (default `drasi-project/drasi-server`, point it at a fork to build
+a fork branch) and runs `cargo build --release --bin drasi-server` instead of
+downloading a release. `DRASI_SERVER_BIN`, if set, still wins over both.
+
+```bash
+# Build drasi-server from a branch and run the gRPC variant against it
+DRASI_SERVER_REF=my-rocksdb-branch \
+DRASI_REPO=drasi-project/drasi-server \
+SERVER_SOURCE_FILE=source_grpc.json SERVER_REACTIONS_FILE=reactions_grpc.json \
+DRASI_SOURCE_PORT=50051 PERSIST_INDEX=true ./run_dynamic.sh
+```
+
+In CI, the same is exposed via the `drasi_server_ref` / `drasi_server_repo`
+`workflow_dispatch` inputs (see below). The step summary reports the resolved
+source (`release …`, `source repo@ref (sha)`, or `preset …`).
+
 ### Selecting a variant locally
 
 ```bash
@@ -190,6 +210,13 @@ The workflow's *Resolve variant* step maps every non-`drasi_lib` variant onto th
 own `ci/drasi_lib/run_test_ci.sh`. The config-axis env vars (`BATCHING_SPEED`,
 `QUERY_TUNING`, `PERSIST_INDEX`, `STATE_STORE`) are passed straight through on
 the *Run test* step.
+
+**Testing a drasi-server branch.** The `drasi_server_ref` input (branch/tag/SHA)
+makes the dynamic variants build drasi-server from source (from `drasi_server_repo`,
+default `drasi-project/drasi-server` — set a fork to build a fork branch) instead
+of downloading a release. Leave it empty for the normal release path. `drasi_lib`
+ignores both (to test a drasi-core branch in the embedded engine, use the
+`[patch.crates-io]` git overrides documented in `e2e-test-framework/Cargo.toml`).
 
 
 ## Adding a new variant

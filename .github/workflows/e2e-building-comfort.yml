@@ -73,7 +73,15 @@ on:
 
       # --- Run settings ---
       drasi_server_version:
-        description: "drasi-server release tag (e.g. v0.1.5). Empty = latest."
+        description: "drasi-server release tag (e.g. v0.1.5). Empty = latest. Ignored when drasi_server_ref is set."
+        required: false
+        default: ""
+      drasi_server_repo:
+        description: "drasi-server repo (owner/name) to build from. Use a fork here. Only applies when drasi_server_ref is set."
+        required: false
+        default: "drasi-project/drasi-server"
+      drasi_server_ref:
+        description: "drasi-server branch/tag/SHA to BUILD from source (http/grpc variants). Empty = download the release binary."
         required: false
         default: ""
       timeout_minutes:
@@ -150,6 +158,11 @@ jobs:
       # drasi_lib runs in-process and ignores this; every other variant
       # downloads the matching drasi-server release binary.
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
+      # When drasi_server_ref is set, the dynamic variants build drasi-server
+      # from that branch/tag/SHA of DRASI_REPO (a fork if drasi_server_repo
+      # points at one) instead of downloading a release. drasi_lib ignores both.
+      DRASI_REPO: ${{ inputs.drasi_server_repo }}
+      DRASI_SERVER_REF: ${{ inputs.drasi_server_ref }}
       # Determinism baselines live inline in each variant's config.json under
       # the Sha256Determinism completion handler's `expected` map. The
       # framework flips the test-run status to Error on mismatch; the runner
