@@ -1,0 +1,36 @@
+# Drasi Server config for the building_comfort DYNAMIC test driver —
+# PERSIST INDEX profile.
+#
+# Same as drasi_server.empty.yaml but with instance-level persistent indexing
+# (built-in RocksDB) turned on. The index (and WAL) are written under ./data
+# relative to the server's working directory (the driver runs the server from
+# WORK_DIR, so it lands in scratch).
+#
+# Because a persistent query rejects non-replay ("volatile") sources, the
+# driver detects persistIndex here and turns on source WAL durability at apply
+# time (see run_dynamic.sh). Sources/queries/reactions are still applied
+# dynamically via the admin REST API.
+
+apiVersion: drasi.io/v1
+id: building-comfort-dynamic
+host: "0.0.0.0"
+port: 8080
+logLevel: info
+persistConfig: false
+persistIndex: true
+
+autoInstallPlugins: true
+# Disable cosign signature verification so locally-built plugins are loaded
+# without a signed lockfile (mirrors the static ci configs).
+verifyPlugins: false
+plugins:
+  - ref: source/grpc
+  - ref: source/http
+  - ref: reaction/grpc
+  - ref: reaction/http
+  - ref: reaction/log
+
+# No sources / queries / reactions: applied dynamically via the REST API.
+sources: []
+queries: []
+reactions: []

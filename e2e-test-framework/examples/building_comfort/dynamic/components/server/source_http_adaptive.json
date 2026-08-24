@@ -1,0 +1,14 @@
+{
+  "kind": "http",
+  "id": "facilities-db",
+  "autoStart": true,
+  "host": "0.0.0.0",
+  "port": 9000,
+  "timeoutMs": 60000,
+  "adaptiveEnabled": true,
+  "adaptiveMaxBatchSize": 1000,
+  "adaptiveMinBatchSize": 10,
+  "adaptiveMaxWaitMs": 50,
+  "adaptiveMinWaitMs": 1,
+  "adaptiveWindowSecs": 5
+}

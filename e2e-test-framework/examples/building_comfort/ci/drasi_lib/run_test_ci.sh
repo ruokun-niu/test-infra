@@ -9,7 +9,7 @@
 #
 # Scheduled / CI runner for the building_comfort / drasi_lib E2E test.
 #
-# Unlike the drasi_server_http and drasi_server_grpc variants, this test
+# Unlike the HTTP/gRPC server-based variants (the dynamic driver), this test
 # uses an *embedded* drasi-lib instance hosted in-process by the
 # test-service — there is no separate drasi-server process and no plugin
 # install step. The test-service crate must therefore be built with the

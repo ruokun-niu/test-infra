@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "grpc",
+    "id": "building-comfort-out",
+    "autoStart": true,
+    "queries": ["building-comfort"],
+    "endpoint": "grpc://localhost:50052",
+    "timeoutMs": 60000,
+    "batchSize": 1,
+    "batchFlushTimeoutMs": 100,
+    "maxRetries": 5,
+    "connectionRetryAttempts": 10,
+    "initialConnectionTimeoutMs": 15000,
+    "metadata": { "x-query-sequence": "building-comfort" }
+  },
+  {
+    "kind": "grpc",
+    "id": "building-comfort-floor-agg-out",
+    "autoStart": true,
+    "queries": ["building-comfort-floor-agg"],
+    "endpoint": "grpc://localhost:50053",
+    "timeoutMs": 60000,
+    "batchSize": 1,
+    "batchFlushTimeoutMs": 100,
+    "maxRetries": 5,
+    "connectionRetryAttempts": 10,
+    "initialConnectionTimeoutMs": 15000,
+    "metadata": { "x-query-sequence": "building-comfort-floor-agg" }
+  }
+]

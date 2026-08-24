@@ -1,0 +1,40 @@
+# Drasi Server config for the building_comfort DYNAMIC test driver —
+# PERSIST INDEX + STATE STORE profile.
+#
+# Combines both instance-level features: the built-in RocksDB persistent index
+# (persistIndex: true) AND the redb plugin state store. Selected when both the
+# persist_index and state_store toggles are on. See the single-feature yamls
+# (drasi_server.persist_index.yaml, drasi_server.state_store.yaml) for details.
+#
+# Both write under ./data relative to the server's working directory (the driver
+# runs the server from WORK_DIR). Because a persistent query rejects non-replay
+# sources, the driver also enables source WAL durability at apply time.
+# Sources/queries/reactions are still applied dynamically via the admin REST API.
+
+apiVersion: drasi.io/v1
+id: building-comfort-dynamic
+host: "0.0.0.0"
+port: 8080
+logLevel: info
+persistConfig: false
+persistIndex: true
+
+stateStore:
+  kind: redb
+  path: ./data/state.redb
+
+autoInstallPlugins: true
+# Disable cosign signature verification so locally-built plugins are loaded
+# without a signed lockfile (mirrors the static ci configs).
+verifyPlugins: false
+plugins:
+  - ref: source/grpc
+  - ref: source/http
+  - ref: reaction/grpc
+  - ref: reaction/http
+  - ref: reaction/log
+
+# No sources / queries / reactions: applied dynamically via the REST API.
+sources: []
+queries: []
+reactions: []

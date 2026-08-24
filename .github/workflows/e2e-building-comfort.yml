@@ -1,19 +1,77 @@
-# Scheduled E2E tests for the building_comfort scenario, run against an
-# external drasi-server over multiple transports (HTTP, gRPC) and also
-# against an embedded drasi-lib instance (in-process inside the
-# test-service crate).
+# Scheduled / manual E2E tests for the building_comfort scenario.
 #
-# Each test pattern lives in its own example folder and exposes a
-# `run_test_ci.sh` that orchestrates the run and writes artifacts to
-# $ARTIFACTS_DIR. This workflow just sets env vars and invokes that
-# script. To add another pattern, copy one of the jobs and point WORKDIR
-# at the new example folder.
+# Coverage is DYNAMIC-first: variants boot a BARE Drasi Server and apply the
+# scenario at runtime via the admin REST API from reusable component JSON
+# under examples/building_comfort/dynamic/ (driven by run_dynamic.sh). A
+# variant is a small component/config selection, not a whole folder.
+#
+#   * http_* / grpc_* variants -> dynamic/run_dynamic.sh (REST-applied components)
+#   * drasi_lib                 -> embedded in-process engine (no external server;
+#                                  runs via ci/drasi_lib/run_test_ci.sh)
+#
+# HTTP adaptive note: adaptive lives on the Drasi Server *source*
+# (adaptiveEnabled) with a standard dispatcher, which is loss-free. The old
+# framework-dispatcher /events/batch approach collapsed per-room results
+# (per-room never reached its count) and was retired.
+#
+# Variant selection:
+#   - Scheduled: 07:00 UTC standard set, 07:30 UTC adaptive set (see crons).
+#   - Manual: tick a checkbox per variant; the matrix is built from checked.
 
 name: E2E - building_comfort
 
 on:
   workflow_dispatch:
     inputs:
+      # --- Variants (one checkbox each; GitHub renders booleans as checkboxes) ---
+      drasi_lib:
+        description: "drasi_lib (embedded, in-process)"
+        type: boolean
+        default: true
+      http_standard:
+        description: "http_standard (HTTP, REST-applied)"
+        type: boolean
+        default: true
+      http_adaptive:
+        description: "http_adaptive (HTTP, server adaptiveEnabled)"
+        type: boolean
+        default: false
+      grpc_standard:
+        description: "grpc_standard (gRPC, REST-applied)"
+        type: boolean
+        default: true
+      grpc_adaptive:
+        description: "grpc_adaptive (gRPC adaptive dispatcher)"
+        type: boolean
+        default: false
+
+      # --- Config axes (applied to whichever variants run) ---
+      batching_speed:
+        description: "Adaptive batching speed preset (affects adaptive variants only)."
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+        default: medium
+      query_tuning:
+        description: "Query capacity preset (priority/dispatch buffers, bootstrap buffer)."
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+        default: medium
+      persist_index:
+        description: "Use the built-in RocksDB persistent index (persistIndex)."
+        type: boolean
+        default: false
+      state_store:
+        description: "Use the redb plugin state store (stateStore)."
+        type: boolean
+        default: false
+
+      # --- Run settings ---
       drasi_server_version:
         description: "drasi-server release tag (e.g. v0.1.5). Empty = latest."
         required: false
@@ -23,24 +81,81 @@ on:
         required: false
         default: "30"
   schedule:
-    # 07:00 UTC daily.
+    # 07:00 UTC — standard set (drasi_lib + dynamic http+grpc).
     - cron: "0 7 * * *"
+    # 07:30 UTC — adaptive set (dynamic http+grpc adaptive).
+    - cron: "30 7 * * *"
 
 permissions:
   contents: read
 
 jobs:
-  building-comfort-drasi-server-http:
-    name: building_comfort / drasi_server_http
+  # Resolve the selected variants into a JSON array consumed by the run job's
+  # matrix. workflow_dispatch uses the per-variant checkboxes; scheduled runs
+  # (checkboxes absent) pick a set based on which cron fired.
+  select-variants:
+    name: select variants
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.compute.outputs.variants }}
+    steps:
+      - name: Compute variant matrix
+        id: compute
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          # Boolean inputs arrive as "true"/"false" (empty on scheduled runs).
+          V_DRASI_LIB: ${{ inputs.drasi_lib }}
+          V_HTTP_STD: ${{ inputs.http_standard }}
+          V_HTTP_ADAPTIVE: ${{ inputs.http_adaptive }}
+          V_GRPC_STD: ${{ inputs.grpc_standard }}
+          V_GRPC_ADAPTIVE: ${{ inputs.grpc_adaptive }}
+        run: |
+          variants=()
+          if [[ -z "$V_DRASI_LIB$V_HTTP_STD$V_HTTP_ADAPTIVE$V_GRPC_STD$V_GRPC_ADAPTIVE" ]]; then
+            # No checkboxes present -> scheduled run; pick a set per cron.
+            case "$SCHEDULE" in
+              "30 7 * * *")
+                variants=(http_adaptive grpc_adaptive) ;;
+              *)
+                variants=(drasi_lib http_standard grpc_standard) ;;
+            esac
+          else
+            [[ "$V_DRASI_LIB"     == "true" ]] && variants+=(drasi_lib)
+            [[ "$V_HTTP_STD"      == "true" ]] && variants+=(http_standard)
+            [[ "$V_HTTP_ADAPTIVE" == "true" ]] && variants+=(http_adaptive)
+            [[ "$V_GRPC_STD"      == "true" ]] && variants+=(grpc_standard)
+            [[ "$V_GRPC_ADAPTIVE" == "true" ]] && variants+=(grpc_adaptive)
+          fi
+
+          if (( ${#variants[@]} == 0 )); then
+            echo "ERROR: no variants selected. Tick at least one checkbox." >&2
+            exit 1
+          fi
+
+          json="$(printf '%s\n' "${variants[@]}" | jq -R . | jq -sc .)"
+          echo "Selected variants: $json"
+          echo "variants=$json" >> "$GITHUB_OUTPUT"
+
+  building-comfort:
+    name: building_comfort / ${{ matrix.variant }}
+    needs: select-variants
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.select-variants.outputs.variants) }}
     env:
-      WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_server_http
+      VARIANT: ${{ matrix.variant }}
+      # drasi_lib runs in-process and ignores this; every other variant
+      # downloads the matching drasi-server release binary.
       DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
-      # Determinism baselines live inline in $WORKDIR/config.json under the
-      # Sha256Determinism completion handler's `expected` map. The framework
-      # flips the test-run status to Error on mismatch; the runner script
-      # surfaces that via the test-service REST API.
+      # Determinism baselines live inline in each variant's config.json under
+      # the Sha256Determinism completion handler's `expected` map. The
+      # framework flips the test-run status to Error on mismatch; the runner
+      # scripts surface that via the test-service REST API. Adaptive variants
+      # reuse the same baselines as their plain counterparts because adaptive
+      # batching must not change results.
 
     steps:
       - name: Checkout
@@ -75,148 +190,79 @@ jobs:
           [[ -z "$mins" ]] && mins=30
           echo "TIMEOUT_SECS=$(( mins * 60 ))" >> "$GITHUB_ENV"
 
+      # Resolve the variant to a runner script (+ dynamic env knobs). drasi_lib
+      # maps to ci/drasi_lib/run_test_ci.sh (embedded engine); every other
+      # variant is dynamic and maps to the shared dynamic/run_dynamic.sh with
+      # component/config selections.
+      - name: Resolve variant
+        run: |
+          case "$VARIANT" in
+            drasi_lib)
+              echo "RUN_SCRIPT=e2e-test-framework/examples/building_comfort/ci/$VARIANT/run_test_ci.sh" >> "$GITHUB_ENV"
+              ;;
+            *)
+              DD="e2e-test-framework/examples/building_comfort/dynamic"
+              echo "RUN_SCRIPT=$DD/run_dynamic.sh"     >> "$GITHUB_ENV"
+              echo "SERVER_QUERIES_FILE=queries.json"  >> "$GITHUB_ENV"
+              case "$VARIANT" in
+                http_standard)
+                  echo "SERVER_SOURCE_FILE=source_http.json"       >> "$GITHUB_ENV"
+                  echo "SERVER_REACTIONS_FILE=reactions_http.json" >> "$GITHUB_ENV"
+                  echo "DRASI_SOURCE_PORT=9000"                    >> "$GITHUB_ENV"
+                  echo "TEST_CFG_SRC=$GITHUB_WORKSPACE/$DD/config.http.json" >> "$GITHUB_ENV"
+                  ;;
+                http_adaptive)
+                  echo "SERVER_SOURCE_FILE=source_http_adaptive.json" >> "$GITHUB_ENV"
+                  echo "SERVER_REACTIONS_FILE=reactions_http.json"    >> "$GITHUB_ENV"
+                  echo "DRASI_SOURCE_PORT=9000"                       >> "$GITHUB_ENV"
+                  echo "TEST_CFG_SRC=$GITHUB_WORKSPACE/$DD/config.http.json" >> "$GITHUB_ENV"
+                  ;;
+                grpc_standard)
+                  echo "SERVER_SOURCE_FILE=source_grpc.json"       >> "$GITHUB_ENV"
+                  echo "SERVER_REACTIONS_FILE=reactions_grpc.json" >> "$GITHUB_ENV"
+                  echo "DRASI_SOURCE_PORT=50051"                   >> "$GITHUB_ENV"
+                  # TEST_CFG_SRC left unset -> driver default (config.json)
+                  ;;
+                grpc_adaptive)
+                  echo "SERVER_SOURCE_FILE=source_grpc.json"       >> "$GITHUB_ENV"
+                  echo "SERVER_REACTIONS_FILE=reactions_grpc.json" >> "$GITHUB_ENV"
+                  echo "DRASI_SOURCE_PORT=50051"                   >> "$GITHUB_ENV"
+                  echo "TEST_CFG_SRC=$GITHUB_WORKSPACE/$DD/config.grpc_adaptive.json" >> "$GITHUB_ENV"
+                  ;;
+                *)
+                  echo "Unknown variant: $VARIANT" >&2; exit 1 ;;
+              esac
+              ;;
+          esac
+
       - name: Build test-service
         working-directory: e2e-test-framework
         run: cargo build --release --manifest-path test-service/Cargo.toml
 
-      - name: Run scheduled test
+      - name: Run test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
           WORK_DIR: ${{ runner.temp }}/ci_work
-        run: bash "${WORKDIR}/run_test_ci.sh"
+          # Adaptive batching preset (low|medium|high). Empty on scheduled
+          # runs -> run_dynamic.sh defaults to medium. Only adaptive variants
+          # consume it; standard variants ignore it.
+          BATCHING_SPEED: ${{ inputs.batching_speed }}
+          # Query capacity preset (low|medium|high). Empty on scheduled runs ->
+          # run_dynamic.sh defaults to medium. Applied to all dynamic variants'
+          # query components; perf-only, results must not change.
+          QUERY_TUNING: ${{ inputs.query_tuning }}
+          # Server instance-config toggles (independent). Empty on scheduled
+          # runs -> run_dynamic.sh defaults both to false (standard). Each
+          # combination selects a committed base yaml.
+          PERSIST_INDEX: ${{ inputs.persist_index }}
+          STATE_STORE: ${{ inputs.state_store }}
+        run: bash "${RUN_SCRIPT}"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: building_comfort-drasi_server_http
-          path: ${{ runner.temp }}/artifacts
-          if-no-files-found: warn
-
-  building-comfort-drasi-server-grpc:
-    name: building_comfort / drasi_server_grpc
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_server_grpc
-      DRASI_SERVER_VERSION: ${{ inputs.drasi_server_version }}
-      # Determinism baselines live inline in $WORKDIR/config.json under the
-      # Sha256Determinism completion handler's `expected` map. First run
-      # uses missing_baseline=Warn so the framework just logs the actual
-      # SHAs; lock them in by copying into `expected` and flipping the
-      # policy to Fail.
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: e2e-test-framework
-
-      - name: Install runtime deps (jq, curl)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq curl
-
-      # test-run-host enables drasi-core's `middleware-jq` feature, which
-      # pulls in jq-sys; jq-sys links against the system libjq + libonig.
-      # Mirror lint.yml / drasi-server's Dockerfile.
-      - name: Install build deps for libjq
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libjq-dev libonig-dev \
-            libprotobuf-dev protobuf-compiler cmake clang libclang-dev
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=$(dirname $(find /usr/lib -name 'libjq.so' | head -1))" >> "$GITHUB_ENV"
-
-      - name: Compute timeout (seconds)
-        run: |
-          mins="${{ inputs.timeout_minutes }}"
-          [[ -z "$mins" ]] && mins=30
-          echo "TIMEOUT_SECS=$(( mins * 60 ))" >> "$GITHUB_ENV"
-
-      - name: Build test-service
-        working-directory: e2e-test-framework
-        run: cargo build --release --manifest-path test-service/Cargo.toml
-
-      - name: Run scheduled test
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
-          WORK_DIR: ${{ runner.temp }}/ci_work
-        run: bash "${WORKDIR}/run_test_ci.sh"
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: building_comfort-drasi_server_grpc
-          path: ${{ runner.temp }}/artifacts
-          if-no-files-found: warn
-
-  building-comfort-drasi-lib:
-    name: building_comfort / drasi_lib
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      WORKDIR: e2e-test-framework/examples/building_comfort/ci/drasi_lib
-      # No external drasi-server: drasi-lib runs in-process inside the
-      # test-service crate, so we skip the download/version inputs.
-      # Determinism baselines live inline in $WORKDIR/config.json under the
-      # Sha256Determinism completion handler's `expected` map. First run
-      # uses missing_baseline=Warn so the framework just logs the actual
-      # SHAs; lock them in by copying into `expected` and flipping the
-      # policy to Fail.
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: e2e-test-framework
-
-      - name: Install runtime deps (jq, curl)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq curl
-
-      - name: Install build deps for libjq
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev libjq-dev libonig-dev \
-            libprotobuf-dev protobuf-compiler cmake clang libclang-dev
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=$(dirname $(find /usr/lib -name 'libjq.so' | head -1))" >> "$GITHUB_ENV"
-
-      - name: Compute timeout (seconds)
-        run: |
-          mins="${{ inputs.timeout_minutes }}"
-          [[ -z "$mins" ]] && mins=30
-          echo "TIMEOUT_SECS=$(( mins * 60 ))" >> "$GITHUB_ENV"
-
-      - name: Build test-service
-        working-directory: e2e-test-framework
-        run: cargo build --release --manifest-path test-service/Cargo.toml
-
-      - name: Run scheduled test
-        env:
-          ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
-          WORK_DIR: ${{ runner.temp }}/ci_work
-        run: bash "${WORKDIR}/run_test_ci.sh"
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: building_comfort-drasi_lib
+          name: building_comfort-${{ matrix.variant }}
           path: ${{ runner.temp }}/artifacts
           if-no-files-found: warn

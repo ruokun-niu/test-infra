@@ -1,0 +1,60 @@
+[
+  {
+    "kind": "http",
+    "id": "building-comfort-out",
+    "autoStart": true,
+    "queries": ["building-comfort"],
+    "baseUrl": "http://localhost:9001",
+    "timeoutMs": 60000,
+    "outputTemplates": {
+      "routes": {
+        "building-comfort": {
+          "added": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort" }
+          },
+          "updated": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort" }
+          },
+          "deleted": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort" }
+          }
+        }
+      }
+    }
+  },
+  {
+    "kind": "http",
+    "id": "building-comfort-floor-agg-out",
+    "autoStart": true,
+    "queries": ["building-comfort-floor-agg"],
+    "baseUrl": "http://localhost:9002",
+    "timeoutMs": 60000,
+    "outputTemplates": {
+      "routes": {
+        "building-comfort-floor-agg": {
+          "added": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort-floor-agg" }
+          },
+          "updated": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort-floor-agg" }
+          },
+          "deleted": {
+            "method": "POST",
+            "url": "/reaction",
+            "headers": { "Content-Type": "application/json", "X-Query-Sequence": "building-comfort-floor-agg" }
+          }
+        }
+      }
+    }
+  }
+]

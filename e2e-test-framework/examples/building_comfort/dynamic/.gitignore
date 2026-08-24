@@ -1,0 +1,6 @@
+# Local run scratch / artifacts produced by run_dynamic.sh
+.local_run/
+.ci_work/
+ci_artifacts/
+# RocksDB persistent index/WAL (written to ./data relative to the server cwd)
+data/

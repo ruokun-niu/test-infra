@@ -1,0 +1,39 @@
+# Empty Drasi Server config for the building_comfort DYNAMIC test driver.
+#
+# Unlike a static per-variant server config (e.g. local/drasi_server_grpc), this
+# file declares NO
+# sources / queries / reactions. The `run_dynamic.sh` driver boots this
+# bare server and then applies components at runtime via the Drasi Server
+# admin REST API (POST /api/v1/{sources,queries,reactions}), composing the
+# scenario from reusable building blocks under components/server/.
+#
+# Only the instance-level settings and the plugins the components need are
+# declared here. To exercise a different transport (e.g. HTTP), the driver
+# posts different component JSON; the plugin list below must include every
+# plugin any applied component can reference.
+#
+# Run from this folder:
+#   <path/to>/bin/drasi-server --config base/drasi_server.empty.yaml
+
+apiVersion: drasi.io/v1
+id: building-comfort-dynamic
+host: "0.0.0.0"
+port: 8080
+logLevel: info
+persistConfig: false
+
+autoInstallPlugins: true
+# Disable cosign signature verification so locally-built plugins are loaded
+# without a signed lockfile (mirrors the static ci configs).
+verifyPlugins: false
+plugins:
+  - ref: source/grpc
+  - ref: source/http
+  - ref: reaction/grpc
+  - ref: reaction/http
+  - ref: reaction/log
+
+# No sources / queries / reactions: applied dynamically via the REST API.
+sources: []
+queries: []
+reactions: []

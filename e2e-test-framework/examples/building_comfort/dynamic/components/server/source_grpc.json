@@ -1,0 +1,8 @@
+{
+  "kind": "grpc",
+  "id": "facilities-db",
+  "autoStart": true,
+  "host": "0.0.0.0",
+  "port": 50051,
+  "timeoutMs": 60000
+}
