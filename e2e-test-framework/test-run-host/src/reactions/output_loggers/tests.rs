@@ -161,6 +161,7 @@ async fn test_performance_metrics_logger() {
 
     let config = OutputLoggerConfig::PerformanceMetrics(PerformanceMetricsOutputLoggerConfig {
         filename: Some("test_performance.json".to_string()),
+        bootstrap_record_count: None,
     });
 
     let mut logger = create_output_logger(reaction_id, &config, &reaction_storage)

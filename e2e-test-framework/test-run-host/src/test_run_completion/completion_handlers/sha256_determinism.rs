@@ -159,7 +159,10 @@ struct ReactionVerdict {
 
 impl Sha256DeterminismCompletionHandler {
     async fn write_verdict_file(&self, verdicts: &[ReactionVerdict]) -> anyhow::Result<()> {
-        let storage = self.data_store.get_test_run_storage(&self.test_run_id).await?;
+        let storage = self
+            .data_store
+            .get_test_run_storage(&self.test_run_id)
+            .await?;
         let path = storage.path.join(DETERMINISM_VERDICT_FILENAME);
 
         let body = json!({

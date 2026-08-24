@@ -114,6 +114,97 @@ source tree.
 
 
 
+## Large-bootstrap presets (issue #78)
+
+The driver can scale the building_comfort **initial dataset** (the graph that is
+delivered as `op:"i"` inserts before steady-state begins) so that bootstrap load
+time and throughput can be measured **separately** from steady-state throughput.
+
+Select a preset with `BOOTSTRAP_SIZE` (env) or the workflow's `bootstrap_size`
+input. The value is the target **room count** (the dominant element); the graph
+is scaled `buildings × floors × rooms/floor` with `floors=10`, `rooms/floor=10`:
+
+| `BOOTSTRAP_SIZE` | buildings | rooms (total) | floors (total) |
+| --- | ---: | ---: | ---: |
+| `10k` | 100   | 10,000    | 1,000   |
+| `100k`| 1000  | 100,000   | 10,000  |
+| `1m`  | 10000 | 1,000,000 | 100,000 |
+
+Empty / `off` (the default, and on scheduled runs) keeps the committed small
+scenario unchanged.
+
+### How the split is measured
+
+The initial graph is delivered as insert change events **before** the first
+steady-state change (`send_initial_inserts` runs to completion, then the change
+stream starts — a single ordered source stream). The reaction's
+`PerformanceMetrics` logger is given a `bootstrap_record_count` (K) equal to the
+number of records the query emits during bootstrap:
+
+- `building-comfort` (`MATCH (r:Room)`) emits **one result per room**, so
+  `K = rooms`.
+- `building-comfort-floor-agg` (per-floor aggregate) re-emits its floor's
+  aggregate once per `FLOOR_ROOM` relation added during bootstrap — i.e. once
+  per room as it joins its floor — so its bootstrap output equals the room
+  count, `K = rooms` (override with `BOOTSTRAP_K_AGG`).
+
+The logger reports separate `bootstrap` and `steady_state` blocks
+(duration + records/sec) in its metrics JSON, surfaced in the workflow's
+**Throughput** summary table.
+
+### Rooms-only (opt-in)
+
+By default both queries run during bootstrap. The floor aggregate re-emits its
+floor's aggregate once per `FLOOR_ROOM` relation, so its bootstrap output equals
+the **room** count (not the floor count); the stop trigger is calibrated to
+`K = rooms` so it stays above the bootstrap output and keeps draining throughout
+bootstrap. (An earlier `K = floors` mis-calibration stopped it *mid-bootstrap*,
+which backpressured the still-dispatching shared source and hung the run — that
+was why rooms-only used to be the default.)
+
+Set `BOOTSTRAP_ROOMS_ONLY=true` to run **only** the per-room `building-comfort`
+query/reaction and drop the floor-aggregate — useful for isolating the per-room
+path.
+
+After bootstrap the driver runs the full steady-state workload
+(`BOOTSTRAP_CHANGE_COUNT` **steady** changes, default **100000**). Note the
+generator's `change_count` limit counts *every* dispatched event — including the
+bootstrap inserts — so the driver sets the underlying `change_count` to
+`bootstrap_events + BOOTSTRAP_CHANGE_COUNT` (else the source would "finish" the
+instant the bootstrap exceeds the limit and the steady phase would never run).
+Completion requires the source to finish **and** the reaction to reach its stop
+count, so the stop is set to `K + steady_target` with the target safely below the
+reaction's natural output: **95%** of the steady changes for `building-comfort`
+(~1 result per change). The remaining ~5% tail is absorbed by the server's query
+buffers after the reaction stops, so the source still finishes. Override with
+`BOOTSTRAP_STEADY_MAIN` (and `BOOTSTRAP_STEADY_AGG` when the aggregate is
+re-enabled).
+
+### Determinism baseline
+
+Because the bootstrap resultset differs from the committed small scenario, the
+preset clears the inline `Sha256Determinism` baselines and sets
+`missing_baseline: Warn` — the run computes and reports the hash (in the summary)
+without failing. Pin a baseline by copying the reported SHA back into a config
+once a green reference run exists.
+
+### Run it locally
+
+```bash
+cd e2e-test-framework/examples/building_comfort/dynamic
+BOOTSTRAP_SIZE=10k ./run_dynamic.sh         # gRPC, 10k-room bootstrap
+
+# HTTP transport, 100k-room bootstrap
+BOOTSTRAP_SIZE=100k \
+SERVER_SOURCE_FILE=source_http.json SERVER_REACTIONS_FILE=reactions_http.json \
+DRASI_SOURCE_PORT=9000 TEST_CFG_SRC="$PWD/config.http.json" ./run_dynamic.sh
+```
+
+> Note: `100k` and especially `1m` produce a large initial insert burst
+> (`1m` ≈ 2.21M bootstrap events); allow extra time and, if combined with
+> `PERSIST_INDEX=true`, expect it to be much slower (WAL fsync per event) — the
+> driver auto-raises `WAL_MAX_EVENTS` to cover the bigger dataset.
+
 ## Apply order
 
 The driver applies **source → queries → reactions** (a query needs its source to
@@ -141,6 +232,32 @@ export WORK_DIR="$PWD/.local_run/work"
 
 On CI/Linux the driver downloads `drasi-server-x86_64-linux-gnu` automatically
 (override with `DRASI_SERVER_VERSION` / `DRASI_TARGET`).
+
+To build the server from source instead, set `DRASI_SERVER_REF` to a branch,
+tag, or commit SHA. `DRASI_REPO` can target a fork:
+
+```bash
+DRASI_REPO=drasi-project/drasi-server DRASI_SERVER_REF=main ./run_dynamic.sh
+```
+
+When `DRASI_CORE_REF` is also set to a branch, the driver injects a temporary
+`[patch.crates-io]` into its disposable drasi-server clone. This redirects all
+drasi-core repository crates used by the server to `DRASI_CORE_REPO` at that
+branch. It relaxes only the clone's direct core-family version constraints,
+updates only those Cargo.lock entries, and verifies with `cargo metadata` that
+no patched package silently remained on crates.io. The repository's real
+`Cargo.toml` is not changed:
+
+```bash
+DRASI_SERVER_REF=main \
+DRASI_CORE_REPO=drasi-project/drasi-core DRASI_CORE_REF=main \
+./run_dynamic.sh
+```
+
+Set `DRASI_PLUGIN_TAG` to pin every untagged plugin reference in the generated
+server config. The server resolver appends the current platform suffix, so
+`DRASI_PLUGIN_TAG=drasi-nightly-test` resolves, for example, to
+`source/grpc:drasi-nightly-test-linux-amd64`.
 
 ### Selecting a variant locally
 
@@ -191,6 +308,31 @@ own `ci/drasi_lib/run_test_ci.sh`. The config-axis env vars (`BATCHING_SPEED`,
 `QUERY_TUNING`, `PERSIST_INDEX`, `STATE_STORE`) are passed straight through on
 the *Run test* step.
 
+### Nightly full-stack performance test
+
+`.github/workflows/nightly-perf.yml` runs daily at 22:00 UTC, allowing for both
+GitHub scheduling delays and drasi-core's roughly 2.5-hour nightly plugin build.
+It can also be started manually.
+
+The workflow first queries the latest completed `nightly.yml` run in
+`drasi-project/drasi-core`. It proceeds only when that run succeeded within the
+last 24 hours; otherwise it skips neutrally because core's own nightly reports
+its failures.
+
+Each performance job:
+
+1. builds drasi-server from `main`;
+2. patches its drasi-core dependencies to drasi-core `main`;
+3. pins server plugins to `drasi-nightly-test`;
+4. runs the `http_standard` and `grpc_standard` building-comfort variants with
+   the `10k` bootstrap preset; and
+5. uploads metrics, determinism verdicts, and logs.
+
+All cross-repository references remain in the dependency direction
+test-infra → drasi-server → drasi-core. Neither lower-level repository needs a
+branch containing a modified `Cargo.toml`, and drasi-core does not reference or
+trigger test-infra.
+
 
 ## Adding a new variant
 
@@ -237,4 +379,3 @@ driver. To get a green run:
 
 - run on a **Linux x86_64** host / CI (where the registry has the plugins), or
 - point `pluginRegistry` at a local plugins directory built from `drasi-core`.
-

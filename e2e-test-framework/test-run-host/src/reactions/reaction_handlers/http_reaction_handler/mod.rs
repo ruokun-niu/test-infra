@@ -268,6 +268,13 @@ async fn http_instance_thread(
         .route(&settings.path, any(handle_reaction))
         .route(&format!("{}/*path", &settings.path), any(handle_reaction))
         .route("/batch", any(handle_reaction))
+        // Accept the reaction callback on ANY path. Different drasi-server /
+        // reaction-plugin versions construct the callback URL differently (e.g.
+        // posting to the query id or the base URL root instead of the configured
+        // path), which otherwise 404s and silently drops every result.
+        // `handle_reaction` derives batch-vs-single from the URI, so serving all
+        // paths is safe and version-tolerant.
+        .fallback(handle_reaction)
         .with_state(state);
 
     let addr = match format!("{}:{}", settings.host, settings.port).parse::<SocketAddr>() {

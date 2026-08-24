@@ -88,8 +88,12 @@ impl TestRepoStore {
 
         if !repo_path.exists() {
             fs::create_dir_all(&repo_path).await?;
-            self.test_repos.insert(id.clone(), repo_config.clone());
         }
+        // Always register the repo in the in-memory map, even when the directory
+        // already exists on disk (e.g. a persisted cache from a prior run with
+        // delete_on_start=false). Otherwise get_test_repo_storage finds the dir
+        // but misses the config entry and panics on `.get(id).unwrap()`.
+        self.test_repos.insert(id.clone(), repo_config.clone());
 
         let test_repo_storage = TestRepoStorage {
             id: id.to_string(),

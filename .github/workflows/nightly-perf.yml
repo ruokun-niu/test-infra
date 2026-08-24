@@ -1,0 +1,295 @@
+# Nightly full-stack performance test (team#106).
+#
+# Dependency direction stays test-infra -> drasi-server -> drasi-core. Core does
+# not trigger or reference this workflow. This workflow consumes core's nightly
+# plugin tag and builds server/core main from source.
+
+name: Nightly perf
+
+on:
+  # TEMPORARY: remove after validating this workflow from the nightly-test branch.
+  push:
+    branches:
+      - nightly-test
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: "Comma/space-separated variants."
+        required: false
+        default: "http_standard grpc_standard"
+      drasi_server_repo:
+        description: "drasi-server repository to build (owner/name)."
+        required: false
+        default: "drasi-project/drasi-server"
+      drasi_server_ref:
+        description: "drasi-server branch/tag/SHA to build."
+        required: false
+        default: "main"
+      drasi_core_repo:
+        description: "drasi-core repository used by the Cargo patch (owner/name)."
+        required: false
+        default: "drasi-project/drasi-core"
+      drasi_core_ref:
+        description: "drasi-core branch used by the Cargo patch."
+        required: false
+        default: "main"
+      plugin_tag:
+        description: "OCI tag applied to every plugin reference."
+        required: false
+        default: "drasi-nightly-test"
+      bootstrap_size:
+        description: "Large-bootstrap performance preset."
+        type: choice
+        options:
+          - "off"
+          - 10k
+          - 100k
+          - 1m
+        default: 10k
+      timeout_minutes:
+        description: "Maximum minutes to wait for each test."
+        required: false
+        default: "45"
+      force:
+        description: "Run even when the core nightly gate is not satisfied."
+        type: boolean
+        default: false
+  schedule:
+    # Core starts at 14:00 UTC, can be delayed by GitHub, and takes about 2.5h.
+    - cron: "0 22 * * *"
+
+permissions:
+  contents: read
+
+env:
+  DEFAULT_VARIANTS: "http_standard grpc_standard"
+  DEFAULT_SERVER_REPO: "drasi-project/drasi-server"
+  DEFAULT_SERVER_REF: "main"
+  DEFAULT_CORE_REPO: "drasi-project/drasi-core"
+  DEFAULT_CORE_REF: "main"
+  DEFAULT_PLUGIN_TAG: "drasi-nightly-test"
+  DEFAULT_BOOTSTRAP_SIZE: "10k"
+  DEFAULT_TIMEOUT_MINUTES: "45"
+
+jobs:
+  gate:
+    name: Check core nightly
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      variants: ${{ steps.check.outputs.variants }}
+      core_sha: ${{ steps.check.outputs.core_sha }}
+    steps:
+      - name: Evaluate core nightly freshness
+        id: check
+        env:
+          CORE_REPO: ${{ inputs.drasi_core_repo }}
+          FORCE: ${{ inputs.force }}
+          IN_VARIANTS: ${{ inputs.variants }}
+        run: |
+          set -euo pipefail
+
+          CORE_REPO="${CORE_REPO:-$DEFAULT_CORE_REPO}"
+          variants_raw="${IN_VARIANTS:-$DEFAULT_VARIANTS}"
+          read -r -a variant_arr <<< "${variants_raw//,/ }"
+          variants_json="$(printf '%s\n' "${variant_arr[@]}" | jq -R . | jq -sc 'map(select(length > 0))')"
+          echo "variants=$variants_json" >> "$GITHUB_OUTPUT"
+          echo "Variants: $variants_json"
+
+          if [[ "$FORCE" == "true" ]]; then
+            echo "core_sha=" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Force enabled: proceeding without querying the core nightly."
+            exit 0
+          fi
+
+          runs_url="https://api.github.com/repos/${CORE_REPO}/actions/workflows/nightly.yml/runs?per_page=1&status=completed"
+          if ! run_json="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$runs_url")"; then
+            echo "::notice::Skipping nightly perf: unable to read the public core nightly status."
+            echo "core_sha=" >> "$GITHUB_OUTPUT"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          conclusion="$(jq -r '.workflow_runs[0].conclusion // "none"' <<< "$run_json")"
+          updated="$(jq -r '.workflow_runs[0].updated_at // ""' <<< "$run_json")"
+          core_sha="$(jq -r '.workflow_runs[0].head_sha // ""' <<< "$run_json")"
+          run_url="$(jq -r '.workflow_runs[0].html_url // ""' <<< "$run_json")"
+          echo "core_sha=$core_sha" >> "$GITHUB_OUTPUT"
+          echo "Latest core nightly: conclusion=$conclusion updated=$updated sha=$core_sha"
+          echo "$run_url"
+
+          fresh=false
+          if [[ -n "$updated" ]]; then
+            now="$(date -u +%s)"
+            then="$(date -u -d "$updated" +%s 2>/dev/null || echo 0)"
+            age=$(( now - then ))
+            (( age >= 0 && age <= 86400 )) && fresh=true
+            echo "Age: ${age}s (fresh=$fresh)"
+          fi
+
+          if [[ "$conclusion" == "success" && "$fresh" == "true" ]]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Skipping nightly perf: core nightly conclusion=$conclusion fresh=$fresh."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  nightly-perf:
+    name: perf / ${{ matrix.variant }}
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.gate.outputs.variants) }}
+    env:
+      VARIANT: ${{ matrix.variant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve nightly inputs
+        env:
+          IN_SERVER_REPO: ${{ inputs.drasi_server_repo }}
+          IN_SERVER_REF: ${{ inputs.drasi_server_ref }}
+          IN_CORE_REPO: ${{ inputs.drasi_core_repo }}
+          IN_CORE_REF: ${{ inputs.drasi_core_ref }}
+          IN_PLUGIN_TAG: ${{ inputs.plugin_tag }}
+          IN_BOOTSTRAP_SIZE: ${{ inputs.bootstrap_size }}
+          IN_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          bootstrap_size="${IN_BOOTSTRAP_SIZE:-$DEFAULT_BOOTSTRAP_SIZE}"
+          timeout_minutes="${IN_TIMEOUT_MINUTES:-$DEFAULT_TIMEOUT_MINUTES}"
+          [[ "$bootstrap_size" == "off" ]] && bootstrap_size=""
+          if [[ ! "$timeout_minutes" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid timeout_minutes: $timeout_minutes" >&2
+            exit 1
+          fi
+          {
+            echo "DRASI_REPO=${IN_SERVER_REPO:-$DEFAULT_SERVER_REPO}"
+            echo "DRASI_SERVER_REF=${IN_SERVER_REF:-$DEFAULT_SERVER_REF}"
+            echo "DRASI_CORE_REPO=${IN_CORE_REPO:-$DEFAULT_CORE_REPO}"
+            echo "DRASI_CORE_REF=${IN_CORE_REF:-$DEFAULT_CORE_REF}"
+            echo "DRASI_PLUGIN_TAG=${IN_PLUGIN_TAG:-$DEFAULT_PLUGIN_TAG}"
+            echo "BOOTSTRAP_SIZE=$bootstrap_size"
+            echo "TIMEOUT_SECS=$(( timeout_minutes * 60 ))"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: e2e-test-framework
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            jq curl build-essential pkg-config libssl-dev libjq-dev libonig-dev \
+            libprotobuf-dev protobuf-compiler cmake clang libclang-dev
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=$(dirname "$(find /usr/lib -name 'libjq.so' | head -1)")" >> "$GITHUB_ENV"
+
+      - name: Resolve variant
+        run: |
+          DD="e2e-test-framework/examples/building_comfort/dynamic"
+          echo "RUN_SCRIPT=$DD/run_dynamic.sh" >> "$GITHUB_ENV"
+          echo "SERVER_QUERIES_FILE=queries.json" >> "$GITHUB_ENV"
+          case "$VARIANT" in
+            http_standard)
+              echo "SERVER_SOURCE_FILE=source_http.json" >> "$GITHUB_ENV"
+              echo "SERVER_REACTIONS_FILE=reactions_http.json" >> "$GITHUB_ENV"
+              echo "DRASI_SOURCE_PORT=9000" >> "$GITHUB_ENV"
+              echo "TEST_CFG_SRC=$GITHUB_WORKSPACE/$DD/config.http.json" >> "$GITHUB_ENV"
+              ;;
+            grpc_standard)
+              echo "SERVER_SOURCE_FILE=source_grpc.json" >> "$GITHUB_ENV"
+              echo "SERVER_REACTIONS_FILE=reactions_grpc.json" >> "$GITHUB_ENV"
+              echo "DRASI_SOURCE_PORT=50051" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported nightly perf variant: $VARIANT" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build test-service
+        working-directory: e2e-test-framework
+        run: cargo build --release --manifest-path test-service/Cargo.toml
+
+      - name: Run test
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
+          WORK_DIR: ${{ runner.temp }}/ci_work
+        run: bash "$RUN_SCRIPT"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: nightly-perf-${{ matrix.variant }}
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: warn
+
+  report-failure:
+    name: Report nightly perf failure
+    needs: [gate, nightly-perf]
+    if: ${{ always() && needs.gate.outputs.proceed == 'true' && needs.nightly-perf.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update failure issue
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const label = 'nightly-perf-failure';
+            const body = [
+              `The nightly performance test failed.`,
+              ``,
+              `- **Run:** ${runUrl}`,
+              `- **drasi-core SHA:** ${{ needs.gate.outputs.core_sha || 'unknown' }}`,
+              `- **Triggered by:** ${context.eventName}`,
+            ].join('\n');
+
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: label, color: 'b60205',
+                description: 'Automated nightly performance test failure',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: label, per_page: 1,
+            });
+
+            if (existing.data.length > 0) {
+              const number = existing.data[0].number;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: number, body,
+              });
+              core.notice(`Updated nightly-perf-failure issue #${number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `Nightly perf test failed (${new Date().toISOString().slice(0, 10)})`,
+                body, labels: [label],
+              });
+              core.notice(`Opened nightly-perf-failure issue #${created.data.number}`);
+            }

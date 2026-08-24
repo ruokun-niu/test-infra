@@ -492,24 +492,27 @@ impl ScriptSourceChangeGeneratorInternalState {
     //     Ok(delay_ns)
     // }
 
-    async fn close_dispatchers(&mut self) {
+    async fn close_dispatchers(&mut self) -> anyhow::Result<()> {
         let dispatchers = &mut self.dispatchers;
 
         log::debug!("Closing dispatchers - #dispatchers:{}", dispatchers.len());
 
         let futures: Vec<_> = dispatchers
             .iter_mut()
-            .map(|dispatcher| async move {
-                let _ = dispatcher.close().await;
-            })
+            .map(|dispatcher| dispatcher.close())
             .collect();
 
-        // Wait for all of them to complete
-        // TODO - Handle errors properly.
-        let _ = join_all(futures).await;
+        join_all(futures)
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(())
     }
 
-    async fn dispatch_source_change_events(&mut self, events: Vec<&SourceChangeEvent>) {
+    async fn dispatch_source_change_events(
+        &mut self,
+        events: Vec<&SourceChangeEvent>,
+    ) -> anyhow::Result<()> {
         let dispatchers = &mut self.dispatchers;
 
         log::debug!(
@@ -522,15 +525,15 @@ impl ScriptSourceChangeGeneratorInternalState {
             .iter_mut()
             .map(|dispatcher| {
                 let events = events.clone();
-                async move {
-                    let _ = dispatcher.dispatch_source_change_events(events).await;
-                }
+                async move { dispatcher.dispatch_source_change_events(events).await }
             })
             .collect();
 
-        // Wait for all of them to complete
-        // TODO - Handle errors properly.
-        let _ = join_all(futures).await;
+        join_all(futures)
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(())
     }
 
     async fn load_next_change_stream_record(&mut self) -> anyhow::Result<()> {
@@ -591,7 +594,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                         self.dispatch_source_change_events(vec![
                             &change_record.source_change_event,
                         ])
-                        .await;
+                        .await?;
                         self.load_next_change_stream_record().await?;
                         self.schedule_next_change_stream_record().await?;
                     }
@@ -601,7 +604,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                             self.dispatch_source_change_events(vec![
                                 &change_record.source_change_event,
                             ])
-                            .await;
+                            .await?;
 
                             self.load_next_change_stream_record().await?;
 
@@ -668,7 +671,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                 log::debug!("Reached Source Change Script Label: {label_record:?}");
             }
             ChangeScriptRecord::Finish(_) => {
-                self.transition_to_finished_state().await;
+                self.transition_to_finished_state().await?;
             }
             ChangeScriptRecord::Header(header_record) => {
                 // Transition to an error state.
@@ -768,7 +771,7 @@ impl ScriptSourceChangeGeneratorInternalState {
         };
 
         // Create the new dispatchers
-        self.close_dispatchers().await;
+        self.close_dispatchers().await?;
         let mut dispatchers: Vec<Box<dyn SourceChangeDispatcher + Send>> = Vec::new();
         for def in self.settings.dispatchers.iter() {
             match create_source_change_dispatcher(def, &self.settings.output_storage).await {
@@ -1081,7 +1084,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                 self.schedule_next_change_stream_record().await
             }
             ScriptSourceChangeGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
         }
@@ -1114,7 +1117,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                 Err(ScriptSourceChangeGeneratorError::PauseToStep.into())
             }
             ScriptSourceChangeGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
         }
@@ -1139,7 +1142,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                 Ok(())
             }
             ScriptSourceChangeGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             ScriptSourceChangeGeneratorCommand::Reset
@@ -1170,7 +1173,7 @@ impl ScriptSourceChangeGeneratorInternalState {
                 Ok(())
             }
             ScriptSourceChangeGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             ScriptSourceChangeGeneratorCommand::Reset
@@ -1199,7 +1202,7 @@ impl ScriptSourceChangeGeneratorInternalState {
         }
     }
 
-    async fn transition_to_finished_state(&mut self) {
+    async fn transition_to_finished_state(&mut self) -> anyhow::Result<()> {
         log::info!("Script Finished for TestRunSource {}", self.settings.id);
 
         self.status = SourceChangeGeneratorStatus::Finished;
@@ -1212,11 +1215,15 @@ impl ScriptSourceChangeGeneratorInternalState {
         self.steps_remaining = 0;
         self.steps_spacing_mode = None;
 
-        self.close_dispatchers().await;
+        let close_result = self.close_dispatchers().await;
+        if let Err(error) = &close_result {
+            self.transition_to_error_state("Failed to close source dispatchers", Some(error));
+        }
         self.write_result_summary().await.ok();
+        close_result
     }
 
-    async fn transition_to_stopped_state(&mut self) {
+    async fn transition_to_stopped_state(&mut self) -> anyhow::Result<()> {
         log::info!("Script Stopped for TestRunSource {}", self.settings.id);
 
         self.status = SourceChangeGeneratorStatus::Stopped;
@@ -1229,8 +1236,12 @@ impl ScriptSourceChangeGeneratorInternalState {
         self.steps_remaining = 0;
         self.steps_spacing_mode = None;
 
-        self.close_dispatchers().await;
+        let close_result = self.close_dispatchers().await;
+        if let Err(error) = &close_result {
+            self.transition_to_error_state("Failed to close source dispatchers", Some(error));
+        }
         self.write_result_summary().await.ok();
+        close_result
     }
 
     fn transition_to_error_state(&mut self, error_message: &str, error: Option<&anyhow::Error>) {
@@ -1437,7 +1448,14 @@ pub async fn script_processor_thread(
                         // This avoids dealing with delayed messages from the delayer thread that are no longer relevant.
                         if change_stream_message.seq_num == state.message_seq_num && state.status.is_processing() {
                             state.process_change_stream_message(change_stream_message).await
-                                .inspect_err(|e| state.transition_to_error_state("Error calling process_change_stream_message", Some(e))).ok();
+                                .inspect_err(|e| {
+                                    if state.status != SourceChangeGeneratorStatus::Error {
+                                        state.transition_to_error_state(
+                                            "Error calling process_change_stream_message",
+                                            Some(e),
+                                        );
+                                    }
+                                }).ok();
                         }
                     }
                     None => {

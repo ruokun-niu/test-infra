@@ -341,8 +341,7 @@ mod tests {
         let a_sum = a.end_test_run().await.unwrap();
 
         // Stream B: same two data records with five heartbeats sprinkled in.
-        let mut b =
-            DeterminismHashOutputLogger::new(reaction_id, &Default::default()).unwrap();
+        let mut b = DeterminismHashOutputLogger::new(reaction_id, &Default::default()).unwrap();
         b.log_handler_record(&beat).await.unwrap();
         b.log_handler_record(&data1).await.unwrap();
         b.log_handler_record(&beat).await.unwrap();

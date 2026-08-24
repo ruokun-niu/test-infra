@@ -37,7 +37,8 @@ use reactions::{
     TestRunReactionDefinition, TestRunReactionState,
 };
 use sources::{
-    bootstrap_data_generators::BootstrapData, create_test_run_source,
+    bootstrap_data_generators::BootstrapData,
+    create_test_run_source,
     source_change_generators::{SourceChangeGeneratorCommandResponse, SourceChangeGeneratorStatus},
     SourceStartMode, TestRunSource, TestRunSourceConfig, TestRunSourceState,
 };
@@ -252,8 +253,7 @@ impl TestRunHost {
                     // push on transitions.
                     let mut poll_interval =
                         tokio::time::interval(std::time::Duration::from_millis(500));
-                    poll_interval
-                        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                     let mut last_source_status: HashMap<
                         TestRunSourceId,
                         SourceChangeGeneratorStatus,

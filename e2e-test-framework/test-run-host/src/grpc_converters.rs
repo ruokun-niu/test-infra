@@ -282,10 +282,10 @@ pub fn convert_from_drasi_query_result(result: QueryResult) -> Result<Vec<JsonVa
         let mut json_obj = Map::new();
 
         // Map the operation enum to a string ("ADD" / "UPDATE" / "DELETE").
-        let type_str = match QueryResultItemType::from_i32(item.item_type) {
-            Some(QueryResultItemType::Add) => "ADD",
-            Some(QueryResultItemType::Update) => "UPDATE",
-            Some(QueryResultItemType::Delete) => "DELETE",
+        let type_str = match QueryResultItemType::try_from(item.item_type) {
+            Ok(QueryResultItemType::Add) => "ADD",
+            Ok(QueryResultItemType::Update) => "UPDATE",
+            Ok(QueryResultItemType::Delete) => "DELETE",
             _ => "UNSPECIFIED",
         };
         json_obj.insert("type".to_string(), JsonValue::String(type_str.to_string()));

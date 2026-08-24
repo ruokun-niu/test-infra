@@ -29,8 +29,9 @@ pub struct AdaptiveGrpcSourceChangeDispatcher {
     // Channel for sending events to the batcher
     event_tx: Option<mpsc::Sender<SourceChangeEvent>>,
     // Handle to the background batcher task
-    batcher_handle: Option<Arc<Mutex<Option<JoinHandle<()>>>>>,
+    batcher_handle: Option<JoinHandle<anyhow::Result<()>>>,
     client: Arc<Mutex<Option<SourceServiceClient<Channel>>>>,
+    failure: Option<String>,
 }
 
 impl AdaptiveGrpcSourceChangeDispatcher {
@@ -61,6 +62,7 @@ impl AdaptiveGrpcSourceChangeDispatcher {
             event_tx: None,
             batcher_handle: None,
             client: Arc::new(Mutex::new(None)),
+            failure: None,
         })
     }
 
@@ -108,9 +110,11 @@ impl AdaptiveGrpcSourceChangeDispatcher {
         // Ensure connected
         Self::ensure_connected(client.clone(), endpoint_url, timeout_seconds).await?;
 
-        let mut client_guard = client.lock().await;
-        let client = client_guard
-            .as_mut()
+        let mut client = client
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Client not available"))?;
 
         // Convert events to protobuf format
@@ -162,7 +166,6 @@ impl AdaptiveGrpcSourceChangeDispatcher {
         let handle = tokio::spawn(async move {
             let mut batcher = AdaptiveBatcher::new(rx, adaptive_config);
             let mut successful_batches = 0u64;
-            let mut failed_batches = 0u64;
 
             info!("Adaptive batcher started for gRPC source dispatcher");
 
@@ -191,8 +194,8 @@ impl AdaptiveGrpcSourceChangeDispatcher {
                             successful_batches += 1;
                             if successful_batches % 100 == 0 {
                                 info!(
-                                    "Adaptive dispatcher metrics - Successful: {}, Failed: {}",
-                                    successful_batches, failed_batches
+                                    "Adaptive dispatcher metrics - Successful: {}",
+                                    successful_batches
                                 );
                             }
                             break;
@@ -200,9 +203,9 @@ impl AdaptiveGrpcSourceChangeDispatcher {
                         Err(e) => {
                             retries += 1;
                             if retries > MAX_RETRIES {
-                                error!("Failed to send batch after {} retries: {}", MAX_RETRIES, e);
-                                failed_batches += 1;
-                                break;
+                                anyhow::bail!(
+                                    "Failed to send adaptive gRPC batch after {MAX_RETRIES} retries: {e}"
+                                );
                             }
                             warn!(
                                 "Batch send failed (retry {}/{}): {}",
@@ -221,14 +224,31 @@ impl AdaptiveGrpcSourceChangeDispatcher {
                 }
             }
 
-            info!(
-                "Adaptive batcher completed - Successful: {}, Failed: {}",
-                successful_batches, failed_batches
-            );
+            info!("Adaptive batcher completed - Successful: {successful_batches}");
+            Ok(())
         });
 
-        self.batcher_handle = Some(Arc::new(Mutex::new(Some(handle))));
+        self.batcher_handle = Some(handle);
         Ok(())
+    }
+
+    async fn await_batcher(&mut self) -> anyhow::Result<()> {
+        let Some(handle) = self.batcher_handle.take() else {
+            return match &self.failure {
+                Some(failure) => Err(anyhow::anyhow!(failure.clone())),
+                None => Ok(()),
+            };
+        };
+
+        let result = handle
+            .await
+            .map_err(|e| anyhow::anyhow!("Adaptive gRPC batcher task failed: {e}"))?;
+
+        if let Err(error) = &result {
+            self.failure = Some(error.to_string());
+        }
+
+        result
     }
 }
 
@@ -240,21 +260,34 @@ impl SourceChangeDispatcher for AdaptiveGrpcSourceChangeDispatcher {
         // Close the event channel to signal batcher to stop
         self.event_tx = None;
 
-        // Wait for batcher to complete if running
-        if let Some(handle_arc) = self.batcher_handle.take() {
-            let mut handle_guard = handle_arc.lock().await;
-            if let Some(join_handle) = handle_guard.take() {
-                drop(handle_guard); // Release lock before awaiting
-                                    // Don't wait forever - use a timeout
-                let _ = tokio::time::timeout(Duration::from_secs(5), join_handle).await;
+        let batcher_result = if let Some(mut handle) = self.batcher_handle.take() {
+            match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => Err(anyhow::anyhow!(
+                    "Adaptive gRPC batcher task failed: {error}"
+                )),
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    Err(anyhow::anyhow!(
+                        "Timed out waiting for adaptive gRPC batcher to stop"
+                    ))
+                }
             }
-        }
+        } else {
+            Ok(())
+        };
 
         // Clear the client
         let mut client_guard = self.client.lock().await;
         *client_guard = None;
+        drop(client_guard);
 
-        Ok(())
+        if let Err(error) = &batcher_result {
+            self.failure = Some(error.to_string());
+        }
+
+        batcher_result
     }
 
     async fn dispatch_source_change_events(
@@ -265,6 +298,20 @@ impl SourceChangeDispatcher for AdaptiveGrpcSourceChangeDispatcher {
             return Ok(());
         }
 
+        if let Some(failure) = &self.failure {
+            anyhow::bail!(failure.clone());
+        }
+
+        if self
+            .batcher_handle
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            self.event_tx = None;
+            self.await_batcher().await?;
+            anyhow::bail!("Adaptive gRPC batcher stopped unexpectedly");
+        }
+
         // Start batcher if not running
         self.start_batcher()?;
 
@@ -272,8 +319,13 @@ impl SourceChangeDispatcher for AdaptiveGrpcSourceChangeDispatcher {
         if let Some(tx) = &self.event_tx {
             for event in events {
                 if tx.send(event.clone()).await.is_err() {
-                    error!("Failed to send event to batcher - channel closed");
-                    return Err(anyhow::anyhow!("Batcher channel closed"));
+                    self.event_tx = None;
+                    return match self.await_batcher().await {
+                        Ok(()) => Err(anyhow::anyhow!(
+                            "Adaptive gRPC batcher channel closed unexpectedly"
+                        )),
+                        Err(e) => Err(e),
+                    };
                 }
             }
         } else {
@@ -281,5 +333,66 @@ impl SourceChangeDispatcher for AdaptiveGrpcSourceChangeDispatcher {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatcher_with_batcher(
+        batcher_handle: JoinHandle<anyhow::Result<()>>,
+    ) -> (
+        AdaptiveGrpcSourceChangeDispatcher,
+        Arc<Mutex<Option<SourceServiceClient<Channel>>>>,
+    ) {
+        let client = Arc::new(Mutex::new(Some(SourceServiceClient::new(
+            Endpoint::from_static("http://127.0.0.1:50051").connect_lazy(),
+        ))));
+
+        (
+            AdaptiveGrpcSourceChangeDispatcher {
+                host: "127.0.0.1".to_string(),
+                port: 50051,
+                source_id: "test-source".to_string(),
+                tls: false,
+                timeout_seconds: 1,
+                adaptive_config: AdaptiveBatchConfig::default(),
+                event_tx: None,
+                batcher_handle: Some(batcher_handle),
+                client: client.clone(),
+                failure: None,
+            },
+            client,
+        )
+    }
+
+    #[tokio::test]
+    async fn close_propagates_and_latches_batcher_failure() {
+        let handle = tokio::spawn(async { Err(anyhow::anyhow!("permanent dispatch failure")) });
+        let (mut dispatcher, client) = dispatcher_with_batcher(handle);
+
+        let error = dispatcher.close().await.unwrap_err();
+
+        assert!(error.to_string().contains("permanent dispatch failure"));
+        assert_eq!(
+            dispatcher.failure.as_deref(),
+            Some("permanent dispatch failure")
+        );
+        assert!(client.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_clears_client_when_batcher_panics() {
+        let handle: JoinHandle<anyhow::Result<()>> =
+            tokio::spawn(async { panic!("batcher panic") });
+        let (mut dispatcher, client) = dispatcher_with_batcher(handle);
+
+        let error = dispatcher.close().await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Adaptive gRPC batcher task failed"));
+        assert!(client.lock().await.is_none());
     }
 }

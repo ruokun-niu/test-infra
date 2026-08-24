@@ -542,19 +542,21 @@ impl StockTradeDataGeneratorInternalState {
         Ok((state, change_rx_channel))
     }
 
-    async fn close_dispatchers(&mut self) {
+    async fn close_dispatchers(&mut self) -> anyhow::Result<()> {
         let dispatchers = &mut self.dispatchers;
 
         log::debug!("Closing dispatchers - #dispatchers:{}", dispatchers.len());
 
         let futures: Vec<_> = dispatchers
             .iter_mut()
-            .map(|dispatcher| async move {
-                let _ = dispatcher.close().await;
-            })
+            .map(|dispatcher| dispatcher.close())
             .collect();
 
-        let _ = join_all(futures).await;
+        join_all(futures)
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(())
     }
 
     async fn send_initial_inserts(&mut self) -> anyhow::Result<()> {
@@ -608,7 +610,7 @@ impl StockTradeDataGeneratorInternalState {
         if !insert_events.is_empty() {
             log::info!("Dispatching {} initial insert events", insert_events.len());
             let events_refs: Vec<&SourceChangeEvent> = insert_events.iter().collect();
-            self.dispatch_source_change_events(events_refs).await;
+            self.dispatch_source_change_events(events_refs).await?;
             self.stats.num_source_change_events += insert_events.len() as u64;
         }
 
@@ -630,7 +632,10 @@ impl StockTradeDataGeneratorInternalState {
         }
     }
 
-    async fn dispatch_source_change_events(&mut self, events: Vec<&SourceChangeEvent>) {
+    async fn dispatch_source_change_events(
+        &mut self,
+        events: Vec<&SourceChangeEvent>,
+    ) -> anyhow::Result<()> {
         let dispatchers = &mut self.dispatchers;
 
         log::debug!(
@@ -643,13 +648,15 @@ impl StockTradeDataGeneratorInternalState {
             .iter_mut()
             .map(|dispatcher| {
                 let events = events.clone();
-                async move {
-                    let _ = dispatcher.dispatch_source_change_events(events).await;
-                }
+                async move { dispatcher.dispatch_source_change_events(events).await }
             })
             .collect();
 
-        let _ = join_all(futures).await;
+        join_all(futures)
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(())
     }
 
     fn log_state(&self, msg: &str) {
@@ -687,7 +694,7 @@ impl StockTradeDataGeneratorInternalState {
         match &mut self.status {
             SourceChangeGeneratorStatus::Running => {
                 self.dispatch_source_change_events(vec![&source_change_event])
-                    .await;
+                    .await?;
 
                 self.previous_event = Some(ProcessedChangeEvent {
                     dispatch_status: self.status,
@@ -698,7 +705,7 @@ impl StockTradeDataGeneratorInternalState {
                 self.stats.num_source_change_events += 1;
 
                 if self.stats.num_source_change_events >= self.settings.change_count {
-                    self.transition_to_finished_state().await;
+                    self.transition_to_finished_state().await?;
                 } else {
                     self.schedule_next_change_event().await?;
                 }
@@ -706,7 +713,7 @@ impl StockTradeDataGeneratorInternalState {
             SourceChangeGeneratorStatus::Stepping => {
                 if self.steps_remaining > 0 {
                     self.dispatch_source_change_events(vec![&source_change_event])
-                        .await;
+                        .await?;
 
                     self.previous_event = Some(ProcessedChangeEvent {
                         dispatch_status: self.status,
@@ -717,7 +724,7 @@ impl StockTradeDataGeneratorInternalState {
                     self.stats.num_source_change_events += 1;
 
                     if self.stats.num_source_change_events >= self.settings.change_count {
-                        self.transition_to_finished_state().await;
+                        self.transition_to_finished_state().await?;
                     } else {
                         self.steps_remaining -= 1;
                         if self.steps_remaining == 0 {
@@ -745,7 +752,7 @@ impl StockTradeDataGeneratorInternalState {
                     self.stats.num_skipped_source_change_events += 1;
 
                     if self.stats.num_source_change_events >= self.settings.change_count {
-                        self.transition_to_finished_state().await;
+                        self.transition_to_finished_state().await?;
                     } else {
                         self.skips_remaining -= 1;
                         if self.skips_remaining == 0 {
@@ -830,7 +837,7 @@ impl StockTradeDataGeneratorInternalState {
     async fn reset(&mut self) -> anyhow::Result<()> {
         log::debug!("Resetting StockTradeDataGenerator");
 
-        self.close_dispatchers().await;
+        self.close_dispatchers().await?;
         let mut dispatchers: Vec<Box<dyn SourceChangeDispatcher + Send>> = Vec::new();
         for def in self.settings.dispatchers.iter() {
             match create_source_change_dispatcher(def, &self.settings.output_storage).await {
@@ -1018,8 +1025,12 @@ impl StockTradeDataGeneratorInternalState {
                 self.status = SourceChangeGeneratorStatus::Running;
 
                 if self.settings.send_initial_inserts {
-                    if let Err(e) = self.send_initial_inserts().await {
-                        log::error!("Failed to send initial inserts: {e}");
+                    if let Err(error) = self.send_initial_inserts().await {
+                        self.transition_to_error_state(
+                            "Failed to send initial inserts",
+                            Some(&error),
+                        );
+                        return Err(error);
                     }
                 }
 
@@ -1037,7 +1048,7 @@ impl StockTradeDataGeneratorInternalState {
                 self.schedule_next_change_event().await
             }
             StockTradeDataGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             StockTradeDataGeneratorCommand::SetTestRunHost { test_run_host } => {
@@ -1074,7 +1085,7 @@ impl StockTradeDataGeneratorInternalState {
                 Err(StockTradeDataGeneratorError::PauseToStep.into())
             }
             StockTradeDataGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             StockTradeDataGeneratorCommand::SetTestRunHost { test_run_host } => {
@@ -1102,7 +1113,7 @@ impl StockTradeDataGeneratorInternalState {
                 Ok(())
             }
             StockTradeDataGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             StockTradeDataGeneratorCommand::Reset
@@ -1136,7 +1147,7 @@ impl StockTradeDataGeneratorInternalState {
                 Ok(())
             }
             StockTradeDataGeneratorCommand::Stop => {
-                self.transition_to_stopped_state().await;
+                self.transition_to_stopped_state().await?;
                 Ok(())
             }
             StockTradeDataGeneratorCommand::Reset
@@ -1172,7 +1183,7 @@ impl StockTradeDataGeneratorInternalState {
         }
     }
 
-    async fn transition_to_finished_state(&mut self) {
+    async fn transition_to_finished_state(&mut self) -> anyhow::Result<()> {
         log::info!("Script Finished for TestRunSource {}", self.settings.id);
 
         self.status = SourceChangeGeneratorStatus::Finished;
@@ -1183,11 +1194,15 @@ impl StockTradeDataGeneratorInternalState {
         self.skips_remaining = 0;
         self.steps_remaining = 0;
 
-        self.close_dispatchers().await;
+        let close_result = self.close_dispatchers().await;
+        if let Err(error) = &close_result {
+            self.transition_to_error_state("Failed to close source dispatchers", Some(error));
+        }
         self.write_result_summary().await.ok();
+        close_result
     }
 
-    async fn transition_to_stopped_state(&mut self) {
+    async fn transition_to_stopped_state(&mut self) -> anyhow::Result<()> {
         log::info!("Script Stopped for TestRunSource {}", self.settings.id);
 
         self.status = SourceChangeGeneratorStatus::Stopped;
@@ -1198,8 +1213,12 @@ impl StockTradeDataGeneratorInternalState {
         self.skips_remaining = 0;
         self.steps_remaining = 0;
 
-        self.close_dispatchers().await;
+        let close_result = self.close_dispatchers().await;
+        if let Err(error) = &close_result {
+            self.transition_to_error_state("Failed to close source dispatchers", Some(error));
+        }
         self.write_result_summary().await.ok();
+        close_result
     }
 
     fn transition_to_error_state(&mut self, error_message: &str, error: Option<&anyhow::Error>) {
@@ -1385,7 +1404,14 @@ pub async fn model_host_thread(
                         log::trace!("Received change stream message: {change_stream_message:?}");
                         if change_stream_message.seq_num == state.event_seq_num && state.status.is_processing() {
                             state.process_change_stream_message(change_stream_message).await
-                                .inspect_err(|e| state.transition_to_error_state("Error calling process_change_stream_message", Some(e))).ok();
+                                .inspect_err(|e| {
+                                    if state.status != SourceChangeGeneratorStatus::Error {
+                                        state.transition_to_error_state(
+                                            "Error calling process_change_stream_message",
+                                            Some(e),
+                                        );
+                                    }
+                                }).ok();
                         }
                     }
                     None => {
