@@ -31,10 +31,12 @@ enum RowChange {
 
 #[derive(Debug, Default)]
 pub(super) struct FinalStateMaterializer {
-    rows: BTreeMap<(String, Vec<u8>), Value>,
+    rows: BTreeMap<(String, Vec<u8>), MaterializedRow>,
+    key_fields: Vec<String>,
     query_ids: BTreeSet<String>,
     change_count: u64,
     duplicate_count: u64,
+    upsert_count: u64,
     missing_before_count: u64,
     skipped_record_count: u64,
     normalization_error_count: usize,
@@ -48,10 +50,12 @@ pub(super) struct FinalStateSummary {
     pub row_count: usize,
     pub change_count: u64,
     pub duplicate_count: u64,
+    pub upsert_count: u64,
     pub missing_before_count: u64,
     pub skipped_record_count: u64,
     pub normalization_error_count: usize,
     pub normalization_errors: Vec<String>,
+    pub key_fields: Vec<String>,
     pub query_ids: Vec<String>,
     pub rows: Vec<FinalStateRow>,
 }
@@ -64,6 +68,13 @@ pub(super) struct FinalStateRow {
 }
 
 impl FinalStateMaterializer {
+    pub fn new(key_fields: Vec<String>) -> Self {
+        Self {
+            key_fields,
+            ..Default::default()
+        }
+    }
+
     pub fn apply_record(&mut self, record: &HandlerRecord) -> anyhow::Result<()> {
         let (query_id, payload) = match &record.payload {
             HandlerPayload::ReactionInvocation {
@@ -116,20 +127,23 @@ impl FinalStateMaterializer {
         self.change_count += 1;
         match change {
             RowChange::Add(after) => {
-                let (key, value) = canonical_row(after)?;
-                if self
+                let row = materialized_row(after, &self.key_fields)?;
+                if let Some(previous) = self
                     .rows
-                    .insert((query_id.to_string(), key), value)
-                    .is_some()
+                    .insert((query_id.to_string(), row.identity.clone()), row.clone())
                 {
-                    self.duplicate_count += 1;
+                    if previous.canonical == row.canonical {
+                        self.duplicate_count += 1;
+                    } else {
+                        self.upsert_count += 1;
+                    }
                 }
             }
             RowChange::Update { before, after } => {
-                let (before_key, _) = canonical_row(before)?;
-                let (after_key, after_value) = canonical_row(after)?;
-                let before_key = (query_id.to_string(), before_key);
-                let after_key = (query_id.to_string(), after_key);
+                let before = materialized_row(before, &self.key_fields)?;
+                let after = materialized_row(after, &self.key_fields)?;
+                let before_key = (query_id.to_string(), before.identity);
+                let after_key = (query_id.to_string(), after.identity.clone());
                 if self.rows.remove(&before_key).is_none() {
                     if self.rows.contains_key(&after_key) {
                         self.duplicate_count += 1;
@@ -137,11 +151,15 @@ impl FinalStateMaterializer {
                     }
                     self.missing_before_count += 1;
                 }
-                self.rows.insert(after_key, after_value);
+                self.rows.insert(after_key, after);
             }
             RowChange::Delete(before) => {
-                let (key, _) = canonical_row(before)?;
-                if self.rows.remove(&(query_id.to_string(), key)).is_none() {
+                let row = materialized_row(before, &self.key_fields)?;
+                if self
+                    .rows
+                    .remove(&(query_id.to_string(), row.identity))
+                    .is_none()
+                {
                     self.duplicate_count += 1;
                 }
             }
@@ -152,8 +170,8 @@ impl FinalStateMaterializer {
     pub fn summary(&self) -> anyhow::Result<FinalStateSummary> {
         let mut aggregate = Sha256::new();
         let mut rows = Vec::with_capacity(self.rows.len());
-        for ((query_id, canonical), value) in &self.rows {
-            let row_sha = hex::encode(Sha256::digest(canonical));
+        for ((query_id, _), row) in &self.rows {
+            let row_sha = hex::encode(Sha256::digest(&row.canonical));
             aggregate.update(query_id.as_bytes());
             aggregate.update(b"\0");
             aggregate.update(row_sha.as_bytes());
@@ -161,7 +179,7 @@ impl FinalStateMaterializer {
             rows.push(FinalStateRow {
                 query_id: query_id.clone(),
                 sha256: row_sha,
-                value: value.clone(),
+                value: row.value.clone(),
             });
         }
 
@@ -171,10 +189,12 @@ impl FinalStateMaterializer {
             row_count: rows.len(),
             change_count: self.change_count,
             duplicate_count: self.duplicate_count,
+            upsert_count: self.upsert_count,
             missing_before_count: self.missing_before_count,
             skipped_record_count: self.skipped_record_count,
             normalization_error_count: self.normalization_error_count,
             normalization_errors: self.normalization_errors.clone(),
+            key_fields: self.key_fields.clone(),
             query_ids: self.query_ids.iter().cloned().collect(),
             rows,
         })
@@ -285,6 +305,37 @@ pub(crate) fn canonical_row(value: Value) -> anyhow::Result<(Vec<u8>, Value)> {
     Ok((bytes, value))
 }
 
+#[derive(Clone, Debug)]
+struct MaterializedRow {
+    identity: Vec<u8>,
+    canonical: Vec<u8>,
+    value: Value,
+}
+
+fn materialized_row(value: Value, key_fields: &[String]) -> anyhow::Result<MaterializedRow> {
+    let (canonical, value) = canonical_row(value)?;
+    let identity = if key_fields.is_empty() {
+        canonical.clone()
+    } else {
+        let object = value.as_object().ok_or_else(|| {
+            anyhow::anyhow!("key_fields require each final-state row to be a JSON object")
+        })?;
+        let mut key = serde_json::Map::new();
+        for field in key_fields {
+            let field_value = object.get(field).ok_or_else(|| {
+                anyhow::anyhow!("final-state row is missing configured key field '{field}'")
+            })?;
+            key.insert(field.clone(), field_value.clone());
+        }
+        serde_json::to_vec(&Value::Object(key))?
+    };
+    Ok(MaterializedRow {
+        identity,
+        canonical,
+        value,
+    })
+}
+
 fn normalize_json_numbers(value: Value) -> Value {
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -377,6 +428,72 @@ mod tests {
             grpc.summary().unwrap().sha256,
             http.summary().unwrap().sha256
         );
+    }
+
+    #[test]
+    fn keyed_adds_replace_prior_aggregate_snapshots() {
+        let mut materializer = FinalStateMaterializer::new(vec!["FloorId".to_string()]);
+        apply(
+            &mut materializer,
+            json!({"result": {"type": "ADD", "after": {
+                "FloorId": "F1", "RoomCount": 1
+            }}}),
+        );
+        apply(
+            &mut materializer,
+            json!({"result": {"type": "ADD", "after": {
+                "FloorId": "F1", "RoomCount": 2
+            }}}),
+        );
+
+        let summary = materializer.summary().unwrap();
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.upsert_count, 1);
+        assert_eq!(summary.duplicate_count, 0);
+        assert_eq!(
+            summary.rows[0].value,
+            json!({"FloorId": "F1", "RoomCount": 2})
+        );
+    }
+
+    #[test]
+    fn keyed_grpc_snapshots_match_http_updates() {
+        let key_fields = vec!["FloorId".to_string()];
+        let mut grpc = FinalStateMaterializer::new(key_fields.clone());
+        apply(
+            &mut grpc,
+            json!({"result": {"type": "ADD", "after": {
+                "FloorId": "F1", "RoomCount": 1.0
+            }}}),
+        );
+        apply(
+            &mut grpc,
+            json!({"result": {"type": "ADD", "after": {
+                "FloorId": "F1", "RoomCount": 2.0
+            }}}),
+        );
+
+        let mut http = FinalStateMaterializer::new(key_fields);
+        apply(
+            &mut http,
+            json!({"reaction_type": "added", "request_body": {
+                "operation": "ADD",
+                "after": {"FloorId": "F1", "RoomCount": 1}
+            }}),
+        );
+        apply(
+            &mut http,
+            json!({"reaction_type": "updated", "request_body": {
+                "operation": "UPDATE",
+                "before": {"FloorId": "F1", "RoomCount": 1},
+                "after": {"FloorId": "F1", "RoomCount": 2}
+            }}),
+        );
+
+        let grpc = grpc.summary().unwrap();
+        let http = http.summary().unwrap();
+        assert_eq!(grpc.sha256, http.sha256);
+        assert_eq!(grpc.rows[0].value, http.rows[0].value);
     }
 
     #[test]

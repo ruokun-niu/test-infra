@@ -131,7 +131,10 @@ FINAL_STATE_CHECK=true ./run_dynamic.sh
 
 The final-state logger normalizes HTTP and gRPC add/update/delete payloads,
 materializes the rows remaining at completion, and hashes the canonical rows in
-stable order. The `Sha256Determinism` completion handler compares that state
+stable order. Each reaction config supplies the logical row key (`RoomId` for
+the room query and `FloorId` for the aggregate), allowing successive gRPC
+aggregate `ADD` snapshots to replace the prior row just like HTTP `UPDATE`
+notifications. The `Sha256Determinism` completion handler compares that state
 against `goldens/final_state.json`.
 
 If the golden does not exist, the runner uses `missing_baseline: Warn` and

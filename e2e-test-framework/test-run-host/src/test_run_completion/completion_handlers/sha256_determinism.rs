@@ -423,6 +423,8 @@ struct FinalStateReaction {
     #[serde(default)]
     duplicate_count: u64,
     #[serde(default)]
+    upsert_count: u64,
+    #[serde(default)]
     missing_before_count: u64,
     #[serde(default)]
     skipped_record_count: u64,
@@ -430,6 +432,8 @@ struct FinalStateReaction {
     normalization_error_count: usize,
     #[serde(default)]
     normalization_errors: Vec<String>,
+    #[serde(default)]
+    key_fields: Vec<String>,
     #[serde(default)]
     query_ids: Vec<String>,
     rows: Vec<FinalStateRow>,
@@ -463,6 +467,7 @@ struct FinalStateReactionVerdict {
     missing_row_count: usize,
     unexpected_row_count: usize,
     actual_duplicate_count: Option<u64>,
+    actual_upsert_count: Option<u64>,
     actual_missing_before_count: Option<u64>,
 }
 
@@ -522,6 +527,7 @@ fn compare_final_state(
                 missing_row_count: missing_hashes.len(),
                 unexpected_row_count: unexpected_hashes.len(),
                 actual_duplicate_count: actual_reaction.map(|value| value.duplicate_count),
+                actual_upsert_count: actual_reaction.map(|value| value.upsert_count),
                 actual_missing_before_count: actual_reaction
                     .map(|value| value.missing_before_count),
             },
@@ -782,10 +788,12 @@ mod tests {
                     row_count,
                     change_count: 0,
                     duplicate_count: 0,
+                    upsert_count: 0,
                     missing_before_count: 0,
                     skipped_record_count: 0,
                     normalization_error_count: 0,
                     normalization_errors: Vec::new(),
+                    key_fields: Vec::new(),
                     query_ids: vec!["q1".to_string()],
                     rows,
                 },

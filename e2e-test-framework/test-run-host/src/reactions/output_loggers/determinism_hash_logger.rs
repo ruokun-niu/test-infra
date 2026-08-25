@@ -42,6 +42,11 @@ pub enum DeterminismHashMode {
 pub struct DeterminismHashOutputLoggerConfig {
     #[serde(default)]
     pub mode: DeterminismHashMode,
+    /// Fields that identify a logical result row in final-state mode. An ADD
+    /// for an existing key replaces the prior value, accommodating transports
+    /// that encode aggregate updates as successive snapshots.
+    #[serde(default)]
+    pub key_fields: Vec<String>,
 }
 
 pub struct DeterminismHashOutputLogger {
@@ -63,7 +68,7 @@ impl DeterminismHashOutputLogger {
             test_run_reaction_id,
             hasher: Sha256::new(),
             mode: config.mode,
-            final_state: FinalStateMaterializer::default(),
+            final_state: FinalStateMaterializer::new(config.key_fields.clone()),
             record_count: 0,
         }))
     }
@@ -473,6 +478,7 @@ mod tests {
         let reaction_id = TestRunReactionId::new(&test_run_id, "r");
         let config = DeterminismHashOutputLoggerConfig {
             mode: DeterminismHashMode::FinalState,
+            key_fields: vec!["id".to_string()],
         };
         let row_one = make_record(
             1,

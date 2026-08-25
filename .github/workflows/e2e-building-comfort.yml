@@ -71,7 +71,7 @@ on:
         type: boolean
         default: false
       final_state_check:
-        description: "Capture/verify the final materialized state (dynamic variants only)."
+        description: "Capture/verify the final materialized state."
         type: boolean
         default: false
       bootstrap_size:

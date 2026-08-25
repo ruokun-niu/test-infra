@@ -877,6 +877,14 @@ patch_configs() {
         patched="$(jq --arg golden "$golden_name" --arg policy "$golden_policy" '
            (.test_run_host.test_runs[].reactions[].output_loggers[]
              | select(.kind == "DeterminismHash")).mode = "final_state"
+           | (.test_run_host.test_runs[].reactions[]
+             | select(.test_reaction_id == "building-comfort")
+             | .output_loggers[]
+             | select(.kind == "DeterminismHash")).key_fields = ["RoomId"]
+           | (.test_run_host.test_runs[].reactions[]
+             | select(.test_reaction_id == "building-comfort-floor-agg")
+             | .output_loggers[]
+             | select(.kind == "DeterminismHash")).key_fields = ["FloorId"]
            | (.data_store.test_repos[].local_tests[].completion_handlers[]
              | select(.kind == "Sha256Determinism"))
              |= (.expected = {}
