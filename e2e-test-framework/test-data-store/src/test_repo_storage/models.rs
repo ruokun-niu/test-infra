@@ -208,9 +208,8 @@ pub struct TestDefinition {
 pub enum CompletionHandlerDefinition {
     /// Log completion summary to configured log level
     Log(LogHandlerConfig),
-    /// Compare each reaction's `DeterminismHash` output-logger SHA-256 to an
-    /// expected baseline. Used to verify that a seeded test run produces the
-    /// same reaction output (and ordering) across runs.
+    /// Compare each reaction's ordered-stream SHA-256 or final materialized
+    /// state to a stored baseline.
     Sha256Determinism(Sha256DeterminismHandlerConfig),
 }
 
@@ -223,16 +222,39 @@ pub struct LogHandlerConfig {
     pub log_level: Option<String>,
 }
 
-/// Configuration for Sha256DeterminismCompletionHandler
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Configuration for ordered-stream or final-state SHA-256 verification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sha256DeterminismHandlerConfig {
     /// Map of `test_reaction_id` -> expected SHA-256 (hex). Reactions absent
     /// from this map are treated according to `missing_baseline`.
     #[serde(default)]
     pub expected: std::collections::BTreeMap<String, String>,
-    /// Behaviour when a reaction has no expected baseline declared.
+    /// Behaviour when an ordered baseline or final-state golden is missing.
     #[serde(default)]
     pub missing_baseline: MissingBaselinePolicy,
+    /// Path to a versioned final-state golden manifest, relative to the test's
+    /// data folder. When set, final-state logger output is compared row by row.
+    #[serde(default)]
+    pub golden_file: Option<String>,
+    /// Maximum number of missing and unexpected rows included per reaction in
+    /// the verdict. Complete actual state is written to a separate candidate.
+    #[serde(default = "default_diagnostic_limit")]
+    pub diagnostic_limit: usize,
+}
+
+fn default_diagnostic_limit() -> usize {
+    20
+}
+
+impl Default for Sha256DeterminismHandlerConfig {
+    fn default() -> Self {
+        Self {
+            expected: std::collections::BTreeMap::new(),
+            missing_baseline: MissingBaselinePolicy::default(),
+            golden_file: None,
+            diagnostic_limit: default_diagnostic_limit(),
+        }
+    }
 }
 
 /// What to do when a reaction has no entry in `expected`.

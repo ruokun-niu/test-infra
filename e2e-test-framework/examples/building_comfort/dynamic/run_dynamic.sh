@@ -183,6 +183,11 @@ BOOTSTRAP_STEADY_AGG="${BOOTSTRAP_STEADY_AGG:-}"
 # stays draining through bootstrap and completes (verified end-to-end at 10k).
 # Default false (run the aggregate); set true to isolate the per-room path.
 BOOTSTRAP_ROOMS_ONLY="${BOOTSTRAP_ROOMS_ONLY:-false}"
+# Opt-in final materialized-state oracle (#84). When enabled, the runner
+# switches DeterminismHash loggers to final_state mode. If the committed golden
+# is absent, missing_baseline=Warn writes a candidate without failing.
+FINAL_STATE_CHECK="${FINAL_STATE_CHECK:-false}"
+FINAL_STATE_GOLDEN_FILE="${FINAL_STATE_GOLDEN_FILE:-$SCRIPT_DIR/goldens/final_state.json}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-$SCRIPT_DIR/ci_artifacts}"
 WORK_DIR="${WORK_DIR:-$SCRIPT_DIR/.ci_work}"
 
@@ -829,6 +834,7 @@ pin_plugin_tags() {
 }
 
 patch_configs() {
+    local patched
     log "Patching empty server config admin port -> $DRASI_ADMIN_PORT"
     sed -E "s/^port:[[:space:]]*8080\$/port: ${DRASI_ADMIN_PORT}/" "$DRASI_CFG_SRC" > "$DRASI_CFG_CI"
     grep -E '^(host|port):' "$DRASI_CFG_CI"
@@ -862,6 +868,38 @@ patch_configs() {
          | .data_store.delete_on_stop = false' \
         "$TEST_CFG_SRC" > "$TEST_CFG_CI"
 
+    if [[ "$FINAL_STATE_CHECK" == "true" ]]; then
+        local golden_name="final_state.json"
+        local golden_policy="Warn"
+        if [[ -f "$FINAL_STATE_GOLDEN_FILE" ]]; then
+            golden_policy="Fail"
+        fi
+        patched="$(jq --arg golden "$golden_name" --arg policy "$golden_policy" '
+           (.test_run_host.test_runs[].reactions[].output_loggers[]
+             | select(.kind == "DeterminismHash")).mode = "final_state"
+           | (.data_store.test_repos[].local_tests[].completion_handlers[]
+             | select(.kind == "Sha256Determinism"))
+             |= (.expected = {}
+                 | .golden_file = $golden
+                 | .missing_baseline = $policy
+                 | .diagnostic_limit = 20)
+        ' "$TEST_CFG_CI")"
+        printf '%s\n' "$patched" > "$TEST_CFG_CI"
+
+        local repo_id test_folder golden_cache_path
+        repo_id="$(jq -r '.data_store.test_repos[0].id' "$TEST_CFG_CI")"
+        test_folder="$(jq -r '.data_store.test_repos[0].local_tests[0].test_folder // .data_store.test_repos[0].local_tests[0].test_id' "$TEST_CFG_CI")"
+        golden_cache_path="$DATA_CACHE/$repo_id/$test_folder/$golden_name"
+        mkdir -p "$(dirname "$golden_cache_path")"
+        if [[ -f "$FINAL_STATE_GOLDEN_FILE" ]]; then
+            cp "$FINAL_STATE_GOLDEN_FILE" "$golden_cache_path"
+            log "Final-state oracle enabled with committed golden: $FINAL_STATE_GOLDEN_FILE"
+        else
+            rm -f "$golden_cache_path"
+            log "Final-state oracle capture mode: no golden at $FINAL_STATE_GOLDEN_FILE; candidate will be written"
+        fi
+    fi
+
     local seed_count
     seed_count="$(jq '[.data_store.test_repos[]?.local_tests[]?.sources[]? | select(.kind == "Model") | .model_data_generator.seed? | select(. != null)] | length' "$TEST_CFG_CI")"
     if [[ "$seed_count" -eq 0 ]]; then
@@ -872,7 +910,6 @@ patch_configs() {
     # Apply the batching-speed preset to any *adaptive* gRPC dispatcher. Only
     # dispatchers with adaptive_enabled==true are touched, so standard gRPC
     # variants keep their config verbatim.
-    local patched
     patched="$(jq --argjson bs "$BATCH_SIZE" --argjson wt "$BATCH_WAIT_MS" '
         (.data_store.test_repos[]?.local_tests[]?.sources[]?.source_change_dispatchers[]?
           | select(.adaptive_enabled == true))
@@ -1310,6 +1347,15 @@ copy_determinism_verdict() {
     fi
 }
 
+copy_final_state_candidate() {
+    local candidate
+    candidate="$(find "$DATA_CACHE" -name 'final_state_candidate.json' -type f -print -quit 2>/dev/null || true)"
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+        cp "$candidate" "$ARTIFACTS_DIR/final_state_candidate.json"
+        log "Copied final-state candidate to $ARTIFACTS_DIR/final_state_candidate.json"
+    fi
+}
+
 # Render a reusable markdown summary and publish it on GitHub Actions when
 # GITHUB_STEP_SUMMARY is available.
 write_step_summary() {
@@ -1427,6 +1473,7 @@ print_summary
 determinism_rc=0
 verify_test_run_status || determinism_rc=$?
 copy_determinism_verdict
+copy_final_state_candidate
 write_step_summary
 
 if (( poll_rc != 0 )); then

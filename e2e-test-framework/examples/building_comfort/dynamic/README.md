@@ -120,6 +120,26 @@ source tree.
 
 
 
+## Final materialized-state golden
+
+Set `FINAL_STATE_CHECK=true` to switch the reaction `DeterminismHash` loggers
+from their default order-sensitive stream mode to final-state mode:
+
+```bash
+FINAL_STATE_CHECK=true ./run_dynamic.sh
+```
+
+The final-state logger normalizes HTTP and gRPC add/update/delete payloads,
+materializes the rows remaining at completion, and hashes the canonical rows in
+stable order. The `Sha256Determinism` completion handler compares that state
+against `goldens/final_state.json`.
+
+If the golden does not exist, the runner uses `missing_baseline: Warn` and
+writes `final_state_candidate.json` to the artifacts directory. Review that
+candidate and copy it to `goldens/final_state.json`; subsequent runs require an
+exact match and report bounded missing and unexpected row details in
+`determinism_verdict.json`. Verification never updates the committed golden.
+
 ## Large-bootstrap presets (issue #78)
 
 The driver can scale the building_comfort **initial dataset** (the graph that is

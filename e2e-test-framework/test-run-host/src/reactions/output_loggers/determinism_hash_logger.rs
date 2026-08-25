@@ -12,20 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Order-sensitive streaming SHA-256 over a reaction's canonical payload.
+//! SHA-256 verification data over reaction output.
 //!
-//! For each incoming `HandlerRecord`, the logger projects to a canonical
-//! payload (`payload.request_body` for `ReactionInvocation`,
-//! `payload.reaction_output` for `ReactionOutput`, otherwise the whole
-//! `payload` object), re-serialises it as compact JSON with recursively
-//! sorted keys, and feeds the bytes (plus a trailing newline) into a running
-//! `Sha256`. On `end_test_run` the digest is finalised and published via
-//! `OutputLoggerResult.summary` as `{ "sha256": "<hex>", "record_count": N }`.
-//!
-//! The hash is intentionally order-sensitive: emission order is part of the
-//! contract being verified, not noise. Tests where reaction-output ordering
-//! is not deterministic (e.g. cross-transport joins) should not enable this
-//! logger.
+//! The default `OrderedStream` mode preserves the historical order-sensitive
+//! hash. `FinalState` materializes add/update/delete changes and hashes the
+//! sorted set of rows that remain when the reaction stops.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -36,14 +27,28 @@ use test_data_store::test_run_storage::TestRunReactionId;
 
 use crate::common::{HandlerPayload, HandlerRecord};
 
+use super::final_state::FinalStateMaterializer;
 use super::{OutputLogger, OutputLoggerResult};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeterminismHashMode {
+    #[default]
+    OrderedStream,
+    FinalState,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DeterminismHashOutputLoggerConfig {}
+pub struct DeterminismHashOutputLoggerConfig {
+    #[serde(default)]
+    pub mode: DeterminismHashMode,
+}
 
 pub struct DeterminismHashOutputLogger {
     test_run_reaction_id: TestRunReactionId,
     hasher: Sha256,
+    mode: DeterminismHashMode,
+    final_state: FinalStateMaterializer,
     record_count: u64,
 }
 
@@ -51,12 +56,14 @@ impl DeterminismHashOutputLogger {
     #[allow(clippy::new_ret_no_self)]
     pub fn new(
         test_run_reaction_id: TestRunReactionId,
-        _config: &DeterminismHashOutputLoggerConfig,
+        config: &DeterminismHashOutputLoggerConfig,
     ) -> anyhow::Result<Box<dyn OutputLogger + Send + Sync>> {
         log::debug!("Creating DeterminismHashOutputLogger for {test_run_reaction_id}");
         Ok(Box::new(Self {
             test_run_reaction_id,
             hasher: Sha256::new(),
+            mode: config.mode,
+            final_state: FinalStateMaterializer::default(),
             record_count: 0,
         }))
     }
@@ -65,6 +72,22 @@ impl DeterminismHashOutputLogger {
 #[async_trait]
 impl OutputLogger for DeterminismHashOutputLogger {
     async fn end_test_run(&mut self) -> anyhow::Result<OutputLoggerResult> {
+        if self.mode == DeterminismHashMode::FinalState {
+            let summary = self.final_state.summary()?;
+            log::info!(
+                "DeterminismHashOutputLogger finalised final state for {}: sha256={} row_count={}",
+                self.test_run_reaction_id,
+                summary.sha256,
+                summary.row_count
+            );
+            return Ok(OutputLoggerResult {
+                has_output: true,
+                logger_name: "DeterminismHash".to_string(),
+                output_folder_path: None,
+                summary: Some(serde_json::to_value(summary)?),
+            });
+        }
+
         let digest = std::mem::replace(&mut self.hasher, Sha256::new()).finalize();
         let hex_sha = hex::encode(digest);
         log::info!(
@@ -78,6 +101,7 @@ impl OutputLogger for DeterminismHashOutputLogger {
             logger_name: "DeterminismHash".to_string(),
             output_folder_path: None,
             summary: Some(json!({
+                "mode": "ordered_stream",
                 "sha256": hex_sha,
                 "record_count": self.record_count,
             })),
@@ -85,6 +109,12 @@ impl OutputLogger for DeterminismHashOutputLogger {
     }
 
     async fn log_handler_record(&mut self, record: &HandlerRecord) -> anyhow::Result<()> {
+        if self.mode == DeterminismHashMode::FinalState {
+            self.final_state.apply_record(record)?;
+            self.record_count += 1;
+            return Ok(());
+        }
+
         // Skip empty-results heartbeats: drasi-lib re-evaluations that coalesce
         // to zero rows still produce a HandlerRecord (`{query_id, results: []}`),
         // and how many of those land between two real records is decided by
@@ -143,7 +173,7 @@ pub(crate) fn canonical_payload_bytes(record: &HandlerRecord) -> anyhow::Result<
 const VOLATILE_KEYS: &[&str] = &["timestamp", "sequenceId"];
 
 /// Recursively remove [`VOLATILE_KEYS`] from every object in `value`.
-fn strip_volatile_keys(value: Value) -> Value {
+pub(crate) fn strip_volatile_keys(value: Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.into_iter()
@@ -170,7 +200,7 @@ fn is_empty_results_heartbeat(value: &Value) -> bool {
     }
 }
 
-fn sort_json_keys(value: Value) -> Value {
+pub(crate) fn sort_json_keys(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut sorted: std::collections::BTreeMap<String, Value> =
@@ -435,5 +465,60 @@ mod tests {
         let r = reverse.end_test_run().await.unwrap();
 
         assert_ne!(f.summary, r.summary);
+    }
+
+    #[tokio::test]
+    async fn final_state_hash_ignores_independent_row_order_and_duplicate_replay() {
+        let test_run_id = TestRunId::new("repo", "test", "run");
+        let reaction_id = TestRunReactionId::new(&test_run_id, "r");
+        let config = DeterminismHashOutputLoggerConfig {
+            mode: DeterminismHashMode::FinalState,
+        };
+        let row_one = make_record(
+            1,
+            HandlerPayload::ReactionInvocation {
+                reaction_type: "Grpc".into(),
+                query_id: "q1".into(),
+                request_method: "POST".into(),
+                request_path: "/".into(),
+                request_body: json!({
+                    "query_id": "q1",
+                    "result": {"type": "ADD", "after": {"id": 1}}
+                }),
+                headers: Default::default(),
+            },
+        );
+        let row_two = make_record(
+            2,
+            HandlerPayload::ReactionInvocation {
+                reaction_type: "Grpc".into(),
+                query_id: "q1".into(),
+                request_method: "POST".into(),
+                request_path: "/".into(),
+                request_body: json!({
+                    "query_id": "q1",
+                    "result": {"type": "ADD", "after": {"id": 2}}
+                }),
+                headers: Default::default(),
+            },
+        );
+
+        let mut first = DeterminismHashOutputLogger::new(reaction_id.clone(), &config).unwrap();
+        first.log_handler_record(&row_one).await.unwrap();
+        first.log_handler_record(&row_two).await.unwrap();
+        let first = first.end_test_run().await.unwrap();
+
+        let mut second = DeterminismHashOutputLogger::new(reaction_id, &config).unwrap();
+        second.log_handler_record(&row_two).await.unwrap();
+        second.log_handler_record(&row_one).await.unwrap();
+        second.log_handler_record(&row_one).await.unwrap();
+        let second = second.end_test_run().await.unwrap();
+
+        assert_eq!(
+            first.summary.as_ref().unwrap()["sha256"],
+            second.summary.as_ref().unwrap()["sha256"]
+        );
+        assert_eq!(second.summary.as_ref().unwrap()["row_count"], 2);
+        assert_eq!(second.summary.as_ref().unwrap()["duplicate_count"], 1);
     }
 }

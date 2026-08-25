@@ -70,6 +70,10 @@ on:
         description: "Use the redb plugin state store (stateStore)."
         type: boolean
         default: false
+      final_state_check:
+        description: "Capture/verify the final materialized state (dynamic variants only)."
+        type: boolean
+        default: false
       bootstrap_size:
         description: "Large-bootstrap preset (rooms). Scales the initial graph so bootstrap load is measured separately from steady-state."
         type: choice
@@ -224,6 +228,10 @@ jobs:
           # run_dynamic.sh leaves the committed small scenario unchanged. Only
           # the dynamic variants consume it; drasi_lib ignores it.
           BOOTSTRAP_SIZE: ${{ inputs.bootstrap_size == 'off' && '' || inputs.bootstrap_size }}
+          # Opt-in final-state oracle for #84. With no committed golden, the
+          # dynamic runner captures final_state_candidate.json without failing.
+          # Scheduled runs leave this false and retain ordered-stream checking.
+          FINAL_STATE_CHECK: ${{ inputs.final_state_check }}
         run: bash e2e-test-framework/examples/building_comfort/run_variant.sh
 
       - name: Upload artifacts

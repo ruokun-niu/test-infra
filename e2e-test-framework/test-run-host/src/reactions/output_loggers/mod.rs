@@ -29,6 +29,7 @@ use crate::common::HandlerRecord;
 
 pub mod console_logger;
 pub mod determinism_hash_logger;
+pub(crate) mod final_state;
 pub mod jsonl_file_logger;
 pub mod performance_metrics_logger;
 
