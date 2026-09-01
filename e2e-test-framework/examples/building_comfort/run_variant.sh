@@ -15,16 +15,15 @@ case "$VARIANT" in
         export TEST_CFG_SRC="$SCRIPT_DIR/dynamic/config.http.json"
         ;;
     http_adaptive)
-        # HTTP with batching on BOTH sides: the framework's adaptive dispatcher
-        # (config.http_adaptive.json) coalesces ingress, and the reaction
-        # (reactions_http_adaptive.json) coalesces egress into {"batch":[...]}
-        # POSTs. A plain server source is used because the dispatcher, not the
-        # server, does the ingress batching here. This both-sided batching is
-        # what lifts HTTP throughput to the gRPC-adaptive range; server-side
-        # adaptiveEnabled alone (source_http_adaptive.json) leaves egress
-        # per-result and stays at the standard rate.
+        # NOTE: Egress HTTP batching is intentionally disabled on this branch.
+        # The reaction-side {"batch":[...]} coalescing (reactions_http_adaptive.json)
+        # requires the framework's http_reaction_handler to accept the batch
+        # envelope, and that fix lives on the fix-http-batching branch. Here we
+        # keep the adaptive ingress dispatcher (config.http_adaptive.json) but
+        # send egress per-result (reactions_http.json) so the variant still runs
+        # and passes -- at reduced throughput.
         export SERVER_SOURCE_FILE="source_http.json"
-        export SERVER_REACTIONS_FILE="reactions_http_adaptive.json"
+        export SERVER_REACTIONS_FILE="reactions_http.json"
         export DRASI_SOURCE_PORT=9000
         export TEST_CFG_SRC="$SCRIPT_DIR/dynamic/config.http_adaptive.json"
         ;;

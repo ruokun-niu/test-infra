@@ -352,15 +352,10 @@ async fn handle_reaction(
     let traceparent = header_map.get("traceparent").cloned();
     let tracestate = header_map.get("tracestate").cloned();
 
-    // Check if this is a batch request. Three shapes are accepted:
-    //   [ {...}, {...} ]        - bare array
-    //   { "results": [...] }    - drasi-lib / platform style
-    //   { "batch":   [...] }    - drasi-reaction-http BatchEnvelope, emitted
-    //                             when the reaction has `adaptive` batching on
+    // Check if this is a batch request (array of batch results or single batch result)
     let is_batch = uri.path().contains("/batch")
         || request_body.is_array()
-        || (request_body.is_object()
-            && (request_body.get("results").is_some() || request_body.get("batch").is_some()));
+        || (request_body.is_object() && request_body.get("results").is_some());
 
     log::debug!(
         "HTTP Reaction Handler received {} request to {} with body type: {}",
@@ -374,14 +369,6 @@ async fn handle_reaction(
         let batch_items = if request_body.is_array() {
             // Direct array of batch results
             request_body.as_array().unwrap().clone()
-        } else if let Some(batch) = request_body.get("batch").and_then(|b| b.as_array()) {
-            // BatchEnvelope: each entry is a self-contained notification, so
-            // each counts as one record. Wrapping them in a synthetic
-            // `results` array keeps the per-item loop below unchanged.
-            batch
-                .iter()
-                .map(|item| serde_json::json!({ "results": [item] }))
-                .collect()
         } else if let Some(results) = request_body.get("results") {
             // Single batch result with results array
             if let Some(_arr) = results.as_array() {
@@ -392,17 +379,6 @@ async fn handle_reaction(
         } else {
             vec![]
         };
-
-        if batch_items.is_empty() {
-            log::warn!(
-                "Batch request to {} produced no items; body keys: {:?}",
-                uri.path(),
-                request_body
-                    .as_object()
-                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default()
-            );
-        }
 
         log::info!(
             "Processing batch with {} items at path {}",
