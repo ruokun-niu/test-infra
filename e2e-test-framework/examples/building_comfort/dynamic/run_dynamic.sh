@@ -826,9 +826,14 @@ resolve_bootstrap_baseline() {
                 BS_BASELINE_AGG="27986794cd4e79e70cceda8ede79a7ee1af4a3318cad1395a3c720c4e38a3768"
                 ;;
             100k:http_adaptive)
-                BS_BASELINE_MAIN="490f70250d0d0bb97d4a6cf1a278e90cee084f72777d0958a2ec2cfc25cc2e63"
-                # BS_BASELINE_AGG intentionally left unset until a full-count run
-                # captures the floor-agg SHA for this preset/transport.
+                # Full record count (main 195000, agg 140000) matched grpc/
+                # http_standard, so this is a complete resultset, not a lossy one
+                # -- adaptive just orders its batched delivery differently, giving
+                # its own deterministic SHAs (distinct from both http_standard and
+                # grpc, exactly as at 10k). Reproduced across runs 33918706710,
+                # 33925188165 (main) and 33925188165 (agg).
+                BS_BASELINE_MAIN="79d8507c13fb02423bce5f2a4da6f3fb11ad7c801d85f63584f61720d56f10e8"
+                BS_BASELINE_AGG="a4a42ee48f51775acf2edc2446215acf5b697a9f5c8fa4dd1ff171743347cbf9"
                 ;;
             # 1m:http)    BS_BASELINE_MAIN="..."; BS_BASELINE_AGG="..." ;;
             # 1m:grpc)    BS_BASELINE_MAIN="..."; BS_BASELINE_AGG="..." ;;
