@@ -617,6 +617,27 @@ resolve_batching_preset() {
     log "Batching speed '$BATCHING_SPEED' -> batch_size=$BATCH_SIZE, wait_ms=$BATCH_WAIT_MS"
 }
 
+# Guardrail: cap the adaptive batch size for large bootstraps. A very large batch
+# against a large in-memory query state makes each ingress POST slow enough that
+# the dispatcher's bounded channel backs up and the single-threaded generator
+# blocks on send -- the steady phase never runs and the reaction hangs at the
+# bootstrap count until the job times out (observed for batch_size 50000 with the
+# 100k preset). batch_size 10000 drains fine at 100k, so clamp to that ceiling for
+# the 100k/1m presets. Only adaptive variants consume BATCH_SIZE, so this is a
+# no-op for standard variants. Runs before the batch size is applied to configs.
+LARGE_BOOTSTRAP_BATCH_CEILING=10000
+clamp_batch_for_bootstrap() {
+    [[ "${BOOTSTRAP_ENABLED:-false}" == "true" ]] || return 0
+    case "$(printf '%s' "$BOOTSTRAP_SIZE" | tr '[:upper:]' '[:lower:]')" in
+        100k|1m)
+            if (( BATCH_SIZE > LARGE_BOOTSTRAP_BATCH_CEILING )); then
+                log "Clamping adaptive batch_size $BATCH_SIZE -> $LARGE_BOOTSTRAP_BATCH_CEILING for bootstrap '$BOOTSTRAP_SIZE' (larger batches stall the generator at this graph scale)"
+                BATCH_SIZE=$LARGE_BOOTSTRAP_BATCH_CEILING
+            fi
+            ;;
+    esac
+}
+
 # Map the QUERY_TUNING preset to server query capacity knobs applied to every
 # query component (priorityQueueCapacity / dispatchBufferCapacity /
 # bootstrapBufferSize). These are perf/backpressure only, so all values must
@@ -1590,6 +1611,7 @@ resolve_query_tuning
 resolve_selected_queries
 resolve_server_config
 resolve_bootstrap_preset
+clamp_batch_for_bootstrap
 patch_configs
 patch_bootstrap_preset
 start_drasi_server
