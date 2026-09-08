@@ -221,6 +221,14 @@ DRASI_RUST_LOG="${DRASI_RUST_LOG:-}"
 # to 1 to honour the PERSIST_INDEX / STATE_STORE inputs instead, so you can
 # demonstrate the "no persistence -> total loss on crash" baseline for contrast.
 CRASH_ALLOW_NO_PERSIST="${CRASH_ALLOW_NO_PERSIST:-0}"
+# A recovered server may converge its internal state WITHOUT re-emitting every
+# reaction notification, so the RecordCount-based completion marker never fires
+# and the run would otherwise hang to TIMEOUT_SECS. For a drain run we therefore
+# also treat the run as complete once the reaction record counts stop changing
+# for CRASH_SETTLE_SECS, then explicitly stop the run (which finalises each
+# reaction's DeterminismHash) so we still get a verdict. Set higher if recovery
+# catch-up is slow/bursty on the runner.
+CRASH_SETTLE_SECS="${CRASH_SETTLE_SECS:-90}"
 # --- Large-bootstrap presets (#78) ---
 # BOOTSTRAP_SIZE selects a preset that scales the building_comfort initial graph
 # (delivered as op:"i" inserts) so bootstrap load time/throughput can be measured
@@ -273,6 +281,9 @@ SERVICE_PID=""
 # REST re-apply), or "skipped" (drain window missed).
 CRASH_INJECTED="no"
 CRASH_RECOVERY_SECS=""
+# "yes" if the run was ended by count-settle (recovery converged without firing
+# the RecordCount completion marker) rather than by normal completion.
+CRASH_SETTLED="no"
 # Human-readable description of where DRASI_SERVER_BIN came from (release tag,
 # source build + optional core patch, or preset). Surfaced in the step summary
 # for result labeling.
@@ -1716,6 +1727,95 @@ wait_for_completion_signal() {
     return 1
 }
 
+# Sum reaction_invocation_count across all reactions. Echoes the total, or empty
+# on a fetch failure so the caller can skip settle bookkeeping for that tick.
+reaction_total_count() {
+    local id url body count total=0 got=0
+    for id in $TEST_REACTION_IDS; do
+        url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/reactions/${id}"
+        body="$(curl -sS "$url" 2>/dev/null || true)"
+        [[ -z "$body" ]] && continue
+        count="$(printf '%s' "$body" | jq -r '.reaction_observer.result_summary.reaction_invocation_count // 0' 2>/dev/null || echo 0)"
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        total=$(( total + count ))
+        got=1
+    done
+    (( got )) && printf '%s' "$total"
+}
+
+# Stop the whole test run via REST. Finalises each reaction's loggers (the
+# DeterminismHash summary is produced in reaction stop()), so a converged-but-
+# uncompleted recovery run still yields a per-reaction SHA to compare.
+stop_test_run_via_rest() {
+    local url="http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/stop"
+    log "POST $url (finalise reactions after settle)"
+    curl -sS -X POST "$url" >/dev/null 2>&1 || log "WARNING: stop request failed"
+    # Give the reactions a moment to transition to Stopped and flush summaries.
+    local id deadline; deadline=$(( $(date +%s) + 30 ))
+    for id in $TEST_REACTION_IDS; do
+        while (( $(date +%s) < deadline )); do
+            local st
+            st="$(curl -sS "http://127.0.0.1:${TEST_SERVICE_PORT}/api/test_runs/${TEST_RUN_ID}/reactions/${id}" 2>/dev/null \
+                | jq -r '.reaction_observer.status // "?"' 2>/dev/null || echo '?')"
+            [[ "$st" == "Stopped" || "$st" == "Error" ]] && break
+            sleep 1
+        done
+    done
+}
+
+# Completion wait for a crash-injection run. Succeeds on the normal completion
+# marker OR when reaction counts stop changing for CRASH_SETTLE_SECS -- a
+# recovered server can converge its state without re-emitting enough
+# notifications to satisfy the RecordCount stop trigger, so the marker may never
+# fire. On settle we stop the run via REST to finalise the determinism hashes.
+wait_for_recovery_completion() {
+    local log_file="$LOG_DIR/test-service.log"
+    local marker="TestRun '${TEST_RUN_ID}' completed:"
+    log "Waiting for completion OR reaction-count settle (crash run)"
+    log "  marker: $marker  settle=${CRASH_SETTLE_SECS}s timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s"
+    local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
+    local start_ts; start_ts=$(date +%s)
+    local last_count="" last_change_ts last_log_ts=0 now
+    now=$(date +%s); last_change_ts=$now
+    while (( now < deadline )); do
+        if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
+            log "ERROR: test-service exited unexpectedly"; return 1
+        fi
+        if ! kill -0 "$DRASI_PID" 2>/dev/null; then
+            log "ERROR: drasi-server exited unexpectedly (post-recovery)"; return 1
+        fi
+        if [[ -s "$log_file" ]] && grep -qF "$marker" "$log_file"; then
+            log "Completion signal observed for $TEST_RUN_ID (recovery re-emitted to threshold)"
+            return 0
+        fi
+        local total; total="$(reaction_total_count)"
+        if [[ -n "$total" ]]; then
+            if [[ "$total" != "$last_count" ]]; then
+                last_count="$total"; last_change_ts=$now
+            elif (( now - last_change_ts >= CRASH_SETTLE_SECS )); then
+                log "Reaction counts settled at total=$total for ${CRASH_SETTLE_SECS}s with no completion marker."
+                log "  Recovery converged below the RecordCount stop threshold; stopping run to capture the verdict."
+                CRASH_SETTLED="yes"
+                stop_test_run_via_rest
+                return 0
+            fi
+        fi
+        if (( now - last_log_ts >= 30 )); then
+            local stable=$(( now - last_change_ts ))
+            log "waiting for completion/settle t=$(( now - start_ts ))s total=${total:-?} stable=${stable}s$(reaction_progress)"
+            last_log_ts=$now
+        fi
+        sleep "$POLL_INTERVAL_SECS"
+        now=$(date +%s)
+    done
+    log "ERROR: neither completion nor settle within ${TIMEOUT_SECS}s"
+    log "--- test-service.log (last 100 lines) ---"; tail -n 100 "$log_file" || true
+    log "--- drasi-server.log (last 120 lines) ---"; tail -n 120 "$LOG_DIR/drasi-server.log" || true
+    local id
+    for id in $TEST_REACTION_IDS; do fetch_final_reaction_state "$id" || true; done
+    return 1
+}
+
 print_summary() {
     local id state_file
     for id in $TEST_REACTION_IDS; do
@@ -1768,6 +1868,53 @@ copy_determinism_verdict() {
     fi
 }
 
+# Inline determinism verdict for a crash run that ended via count-settle: the
+# completion handler that normally writes determinism_verdict.json only runs on
+# NATURAL completion, not on the explicit stop we issue after settle. Compares
+# each reaction's finalised DeterminismHash SHA to the Sha256Determinism
+# `expected` baseline in the test config. Returns 1 on any mismatch. NOTE: a
+# mismatch here is order-sensitive -- a recovery that re-emitted/reordered but
+# converged to the correct final state will also mismatch, so treat a failure as
+# "diverged stream, verify final state", not proof of data loss.
+write_crash_determinism_verdict() {
+    local verdict_file="$ARTIFACTS_DIR/determinism_verdict.json"
+    local expected_map
+    expected_map="$(jq -c '
+        .data_store.test_repos[]?.local_tests[]?.completion_handlers[]?
+        | select(.kind == "Sha256Determinism") | .expected // {}
+    ' "$TEST_CFG_CI" 2>/dev/null | head -n1)"
+    [[ -z "$expected_map" || "$expected_map" == "null" ]] && expected_map='{}'
+
+    local results="{}" fail=0 id state_file actual expected passed
+    for id in $TEST_REACTION_IDS; do
+        state_file="$ARTIFACTS_DIR/final_reaction_state__${id}.json"
+        actual=""
+        [[ -s "$state_file" ]] && actual="$(jq -r '
+            (.reaction_observer.logger_results[]?
+                | select(.logger_name == "DeterminismHash")
+                | .summary.sha256) // empty' "$state_file" 2>/dev/null)"
+        expected="$(printf '%s' "$expected_map" | jq -r --arg id "$id" '.[$id] // empty' 2>/dev/null)"
+        if [[ -z "$actual" ]]; then
+            log "[$id] no DeterminismHash SHA captured after stop"; passed=false; fail=1
+        elif [[ -z "$expected" ]]; then
+            log "[$id] determinism: no baseline; actual=$actual"; passed=true
+        elif [[ "$actual" == "$expected" ]]; then
+            log "[$id] determinism MATCH (sha=${actual:0:12}…) -- recovery reproduced the clean stream"; passed=true
+        else
+            log "[$id] determinism MISMATCH expected=${expected:0:12}… actual=${actual:0:12}… -- recovery diverged the diff stream; verify final state (reordered-but-correct vs lost data)"; passed=false; fail=1
+        fi
+        results="$(printf '%s' "$results" | jq --arg id "$id" --arg a "$actual" --arg e "$expected" --argjson p "$passed" \
+            '.[$id] = {actual: ($a // null), expected: ($e // null), passed: $p}')"
+    done
+    jq --arg run "$TEST_RUN_ID" --argjson results "$results" \
+        '{test_run_id: $run, results: $results, note: "inline crash-run verdict (count-settle); order-sensitive SHA -- a mismatch may be reordered-but-correct recovery, verify final state"}' \
+        <<<'{}' > "$verdict_file"
+    echo "::group::Determinism verdict (crash inline)"
+    jq '.' "$verdict_file" 2>/dev/null || cat "$verdict_file"
+    echo "::endgroup::"
+    return "$fail"
+}
+
 # Render a reusable markdown summary and publish it on GitHub Actions when
 # GITHUB_STEP_SUMMARY is available.
 write_step_summary() {
@@ -1792,7 +1939,7 @@ write_step_summary() {
         echo "- query tuning: \`$QUERY_TUNING\` (priorityQueueCapacity=$PRIORITY_QUEUE_CAP, dispatchBufferCapacity=$DISPATCH_BUFFER_CAP, bootstrapBufferSize=$BOOTSTRAP_BUFFER_SIZE)"
         echo "- server config: persistIndex=\`$SERVER_PROFILE_PERSIST_INDEX\`, stateStore=\`$SERVER_PROFILE_STATE_STORE\`$([[ "$SERVER_PERSIST_INDEX" == "true" ]] && echo " (source WAL durability on, max_events=$WAL_MAX_EVENTS)")"
         if [[ "$CRASH_INJECT" != "off" ]]; then
-            echo "- crash injection: \`$CRASH_INJECT\` -> outcome=\`$CRASH_INJECTED\`$([[ -n "$CRASH_RECOVERY_SECS" ]] && echo ", recovery=${CRASH_RECOVERY_SECS}s")"
+            echo "- crash injection: \`$CRASH_INJECT\` -> outcome=\`$CRASH_INJECTED\`$([[ -n "$CRASH_RECOVERY_SECS" ]] && echo ", recovery=${CRASH_RECOVERY_SECS}s"), completion=\`$([[ "$CRASH_SETTLED" == "yes" ]] && echo "count-settle" || echo "marker")\`"
         fi
         echo
 
@@ -1885,7 +2032,17 @@ if [[ "$CRASH_INJECT" == "drain" ]]; then
 fi
 
 poll_rc=0
-if wait_for_completion_signal; then
+if [[ "$CRASH_INJECT" == "drain" ]]; then
+    # Recovery can converge without firing the RecordCount marker, so use the
+    # settle-aware wait (it stops the run on settle to finalise the hashes).
+    if wait_for_recovery_completion; then
+        for id in $TEST_REACTION_IDS; do
+            fetch_final_reaction_state "$id" || poll_rc=1
+        done
+    else
+        poll_rc=1
+    fi
+elif wait_for_completion_signal; then
     for id in $TEST_REACTION_IDS; do
         fetch_final_reaction_state "$id" || poll_rc=1
     done
@@ -1897,6 +2054,11 @@ print_summary
 determinism_rc=0
 verify_test_run_status || determinism_rc=$?
 copy_determinism_verdict
+# A crash run ended by count-settle has no handler-written verdict, so compute
+# one inline from the finalised per-reaction SHAs.
+if [[ "$CRASH_INJECT" == "drain" && ! -s "$ARTIFACTS_DIR/determinism_verdict.json" ]]; then
+    write_crash_determinism_verdict || determinism_rc=$?
+fi
 write_step_summary
 
 if (( poll_rc != 0 )); then
