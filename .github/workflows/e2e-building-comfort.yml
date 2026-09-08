@@ -87,6 +87,13 @@ on:
         description: "Use the redb plugin state store (stateStore)."
         type: boolean
         default: false
+      crash_inject:
+        description: "Failure-recovery injection (#70): 'drain' SIGKILLs drasi-server after ingress completes, then restarts it against persisted state (forces persistIndex+stateStore on). Dynamic variants only."
+        type: choice
+        options:
+          - "off"
+          - drain
+        default: "off"
       bootstrap_size:
         description: "Large-bootstrap preset (rooms). Scales the initial graph so bootstrap load is measured separately from steady-state."
         type: choice
@@ -299,6 +306,11 @@ jobs:
           # combination selects a committed base yaml.
           PERSIST_INDEX: ${{ inputs.persist_index }}
           STATE_STORE: ${{ inputs.state_store }}
+          # Failure-recovery crash injection (#70 phase one). Empty on scheduled
+          # runs -> run_dynamic.sh defaults to 'off'. 'drain' SIGKILLs the server
+          # after ingress completes and restarts it against persisted state;
+          # forces persistIndex + stateStore on. drasi_lib ignores it.
+          CRASH_INJECT: ${{ inputs.crash_inject }}
           # Large-bootstrap preset (off|10k|100k|1m). Empty on scheduled runs ->
           # run_dynamic.sh leaves the committed small scenario unchanged. Only
           # the dynamic variants consume it; drasi_lib ignores it.

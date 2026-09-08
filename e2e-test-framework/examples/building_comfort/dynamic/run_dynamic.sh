@@ -190,6 +190,36 @@ SERVER_PROFILE_STATE_STORE="${STATE_STORE:-false}"
 # exceed the total events this scenario emits so the default RejectIncoming
 # capacity policy never drops events.
 WAL_MAX_EVENTS="${WAL_MAX_EVENTS:-500000}"
+# --- Failure-recovery crash injection (#70 phase one) ---
+# CRASH_INJECT selects a fault-injection mode:
+#   off   (default) — no injection; today's behaviour.
+#   drain — Option A: after the source finishes DISPATCHING all changes (ingress
+#           closed) but while the server is still draining/checkpointing, SIGKILL
+#           the drasi-server process and restart it WITHOUT wiping ./data, so WAL
+#           replay + checkpoint recovery run against the persisted state. No
+#           source reconnect is needed because dispatch is already complete.
+# Recovery requires persistence, so `drain` forces PERSIST_INDEX + STATE_STORE on
+# and patches persistConfig: true (so the server restores component definitions
+# on restart instead of coming back bare).
+CRASH_INJECT="${CRASH_INJECT:-off}"
+# Grace period (ms) to wait after the source-finished marker before the SIGKILL,
+# letting the dispatcher flush any in-flight events into the server's WAL so the
+# drain-phase crash does not lose un-ingested events.
+CRASH_DELAY_MS="${CRASH_DELAY_MS:-500}"
+# What to do if the restarted server comes back with no components (i.e. the
+# persistConfig restore path did not repopulate the registry):
+#   auto (default) — re-apply components via REST only if GET shows none, and warn
+#                    loudly that this bypasses WAL-replay recovery.
+#   no             — never re-apply; let the run fail so the gap is visible.
+CRASH_REAPPLY_COMPONENTS="${CRASH_REAPPLY_COMPONENTS:-auto}"
+# RUST_LOG applied to the drasi-server process. Empty = server default. A
+# drain-injection run defaults this to `info` (below) so WAL-replay / recovery
+# lines land in drasi-server.log; override to e.g. debug for deeper tracing.
+DRASI_RUST_LOG="${DRASI_RUST_LOG:-}"
+# A drain-injection run forces per-record reaction JSONL on (LOG_JSONL=1) so the
+# recovered final state can be diffed row-by-row against a clean run when the
+# determinism SHA mismatches. Set CRASH_NO_JSONL=1 to opt out (e.g. perf timing).
+CRASH_NO_JSONL="${CRASH_NO_JSONL:-0}"
 # --- Large-bootstrap presets (#78) ---
 # BOOTSTRAP_SIZE selects a preset that scales the building_comfort initial graph
 # (delivered as op:"i" inserts) so bootstrap load time/throughput can be measured
@@ -237,6 +267,11 @@ mkdir -p "$WORK_DIR" "$LOG_DIR" "$ARTIFACTS_DIR"
 
 DRASI_PID=""
 SERVICE_PID=""
+# Crash-injection outcome, surfaced in the summary. "no" until an injection runs;
+# then "yes" (recovered via persisted state), "reapplied" (recovered but needed a
+# REST re-apply), or "skipped" (drain window missed).
+CRASH_INJECTED="no"
+CRASH_RECOVERY_SECS=""
 # Human-readable description of where DRASI_SERVER_BIN came from (release tag,
 # source build + optional core patch, or preset). Surfaced in the step summary
 # for result labeling.
@@ -690,6 +725,36 @@ resolve_selected_queries() {
     log "Selected queries: [$SELECTED_QUERIES] (of: $(echo "$known" | tr '\n' ' '))"
 }
 
+# Validate CRASH_INJECT and force the settings recovery requires. A drain-phase
+# crash can only be recovered from if the server persists its state, so `drain`
+# forces the persist_index + state_store profiles on (overriding the PERSIST_INDEX
+# / STATE_STORE inputs) and, later, patches persistConfig: true.
+resolve_crash_inject() {
+    case "$CRASH_INJECT" in
+        off) return 0 ;;
+        drain) ;;
+        *)
+            log "ERROR: CRASH_INJECT must be 'off' or 'drain' (got '$CRASH_INJECT')"
+            return 1
+            ;;
+    esac
+    if [[ "$SERVER_PROFILE_PERSIST_INDEX" != "true" || "$SERVER_PROFILE_STATE_STORE" != "true" ]]; then
+        log "CRASH_INJECT=drain requires persistence; forcing PERSIST_INDEX=true STATE_STORE=true (were persist_index=$SERVER_PROFILE_PERSIST_INDEX state_store=$SERVER_PROFILE_STATE_STORE)"
+    fi
+    SERVER_PROFILE_PERSIST_INDEX=true
+    SERVER_PROFILE_STATE_STORE=true
+    # Capture the server's recovery/WAL-replay logs (default level info).
+    if [[ -z "$DRASI_RUST_LOG" ]]; then
+        DRASI_RUST_LOG="info"
+    fi
+    # Keep the per-record reaction JSONL so a SHA mismatch can be diagnosed by
+    # diffing the recovered final state against a clean run.
+    if [[ "$CRASH_NO_JSONL" != "1" ]]; then
+        LOG_JSONL=1
+    fi
+    log "CRASH_INJECT=drain: SIGKILL after source-finished (+${CRASH_DELAY_MS}ms), restart preserving ./data (reapply_components=$CRASH_REAPPLY_COMPONENTS, server RUST_LOG=$DRASI_RUST_LOG, LOG_JSONL=$LOG_JSONL)"
+}
+
 # Select the committed base server yaml from the two INDEPENDENT instance-config
 # toggles (PERSIST_INDEX, STATE_STORE). Each of the four combinations has its own
 # committed yaml under base/, so the yaml stays the source of truth for
@@ -697,8 +762,7 @@ resolve_selected_queries() {
 # The driver derives SERVER_PERSIST_INDEX from the selected yaml so it can also
 # enable source WAL durability (persistent queries reject non-replay sources) and
 # pre-create the RocksDB index dir.
-resolve_server_config() {
-    local pi="$SERVER_PROFILE_PERSIST_INDEX" ss="$SERVER_PROFILE_STATE_STORE" base
+resolve_server_config() {    local pi="$SERVER_PROFILE_PERSIST_INDEX" ss="$SERVER_PROFILE_STATE_STORE" base
     case "$pi:$ss" in
         false:false) base="drasi_server.empty.yaml" ;;
         true:false)  base="drasi_server.persist_index.yaml" ;;
@@ -1005,6 +1069,20 @@ patch_configs() {
             "$DRASI_CFG_CI" > "$DRASI_CFG_CI.tmp" && mv "$DRASI_CFG_CI.tmp" "$DRASI_CFG_CI"
     fi
 
+    # Recovery needs the server to restore its component definitions on restart,
+    # so flip persistConfig to true for a crash-injection run. The base yamls ship
+    # persistConfig: false; without this the restarted server comes back bare.
+    if [[ "$CRASH_INJECT" == "drain" ]]; then
+        if grep -qE '^persistConfig:' "$DRASI_CFG_CI"; then
+            sed -E 's/^persistConfig:[[:space:]]*false[[:space:]]*$/persistConfig: true/' \
+                "$DRASI_CFG_CI" > "$DRASI_CFG_CI.tmp" && mv "$DRASI_CFG_CI.tmp" "$DRASI_CFG_CI"
+        else
+            printf 'persistConfig: true\n' >> "$DRASI_CFG_CI"
+        fi
+        log "CRASH_INJECT=drain: patched persistConfig -> true"
+        grep -E '^persistConfig:' "$DRASI_CFG_CI" | sed 's/^/  /'
+    fi
+
     pin_plugin_tags
     set_plugin_registry
 
@@ -1124,6 +1202,7 @@ start_drasi_server() {
     mkdir -p "$WORK_DIR/data"
     (
         cd "$WORK_DIR"
+        [[ -n "$DRASI_RUST_LOG" ]] && export RUST_LOG="$DRASI_RUST_LOG"
         exec "$DRASI_SERVER_BIN" --config "$DRASI_CFG_CI" \
             > "$LOG_DIR/drasi-server.log" 2>&1
     ) &
@@ -1135,6 +1214,150 @@ start_drasi_server() {
         return 1
     fi
     prepare_rocksdb_index_dirs
+}
+
+# Restart drasi-server for crash-recovery: re-exec on the SAME config WITHOUT
+# wiping ./data, so RocksDB index + redb WAL + persisted config survive and the
+# server replays/recovers on startup. Appends to the existing server log so the
+# pre-crash and post-crash logs stay in one file. Updates DRASI_PID (same shell)
+# so the completion wait and cleanup track the new process.
+restart_drasi_server() {
+    log "Restarting drasi-server for recovery (preserving $WORK_DIR/data)"
+    # Clear boundary so the pre-crash and post-crash halves of the single
+    # appended log file are easy to separate when triaging a failed recovery.
+    {
+        echo "================================================================="
+        echo "[dyn] ===== DRASI-SERVER RESTART (recovery) $(date -u +%FT%TZ) ====="
+        echo "================================================================="
+    } >> "$LOG_DIR/drasi-server.log"
+    (
+        cd "$WORK_DIR"
+        [[ -n "$DRASI_RUST_LOG" ]] && export RUST_LOG="$DRASI_RUST_LOG"
+        exec "$DRASI_SERVER_BIN" --config "$DRASI_CFG_CI" \
+            >> "$LOG_DIR/drasi-server.log" 2>&1
+    ) &
+    DRASI_PID=$!
+    log "drasi-server restarted pid=$DRASI_PID"
+    if ! wait_for_http "http://127.0.0.1:${DRASI_ADMIN_PORT}/health" "drasi-server admin API (recovery)" 120; then
+        log "--- drasi-server.log (last 200 lines) ---"
+        tail -n 200 "$LOG_DIR/drasi-server.log" || true
+        return 1
+    fi
+    prepare_rocksdb_index_dirs
+}
+
+# Block until the source generator reports it has dispatched every change, i.e.
+# the test-service log shows "Script Finished for TestRunSource". This marks the
+# point where ingress is closed but the server may still be draining — the
+# drain-phase (Option A) injection window. Bounded by TIMEOUT_SECS.
+wait_for_source_finished() {
+    local log_file="$LOG_DIR/test-service.log"
+    local marker="Script Finished for TestRunSource"
+    local completion="TestRun '${TEST_RUN_ID}' completed:"
+    log "Waiting for source-finished marker before crash injection"
+    log "  marker: $marker  (timeout=${TIMEOUT_SECS}s)"
+    local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
+    local now; now=$(date +%s)
+    while (( now < deadline )); do
+        if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
+            log "ERROR: test-service exited before source finished"; return 1
+        fi
+        if ! kill -0 "$DRASI_PID" 2>/dev/null; then
+            log "ERROR: drasi-server exited before source finished"; return 1
+        fi
+        if [[ -s "$log_file" ]] && grep -qF "$marker" "$log_file"; then
+            log "Source-finished marker observed"
+            return 0
+        fi
+        # If the run already completed we missed the drain window entirely.
+        if [[ -s "$log_file" ]] && grep -qF "$completion" "$log_file"; then
+            log "WARNING: run completed before source-finished marker; drain window missed"
+            return 2
+        fi
+        sleep "$POLL_INTERVAL_SECS"
+        now=$(date +%s)
+    done
+    log "ERROR: source-finished marker not observed within ${TIMEOUT_SECS}s"
+    return 1
+}
+
+# Option A crash injection: wait for the drain window, SIGKILL the server, then
+# restart it against the persisted state. Returns non-zero only on a setup error
+# (a missed window is downgraded to a skip so the run still completes cleanly and
+# we can see whether the ordinary path passes).
+inject_crash_and_restart() {
+    local rc=0
+    wait_for_source_finished || rc=$?
+    if (( rc == 2 )); then
+        log "Crash injection SKIPPED (drain window missed). Increase load or lower CRASH_DELAY_MS."
+        CRASH_INJECTED="skipped"
+        return 0
+    elif (( rc != 0 )); then
+        return "$rc"
+    fi
+
+    # Grace period so any in-flight dispatched events land in the WAL before the
+    # kill (otherwise the drain crash would lose un-ingested events, not test
+    # recovery). CRASH_DELAY_MS is milliseconds.
+    local grace_s
+    grace_s="$(awk -v ms="$CRASH_DELAY_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
+    log "Grace ${CRASH_DELAY_MS}ms before SIGKILL (let ingress flush to WAL)"
+    sleep "$grace_s"
+
+    if ! kill -0 "$DRASI_PID" 2>/dev/null; then
+        log "WARNING: drasi-server already gone before injection; skipping"
+        CRASH_INJECTED="skipped"
+        return 0
+    fi
+
+    # If the run finished during the grace period, crashing now tests nothing
+    # (the pre-crash stream already produced the verdict). Downgrade to a skip.
+    if grep -qF "TestRun '${TEST_RUN_ID}' completed:" "$LOG_DIR/test-service.log" 2>/dev/null; then
+        log "WARNING: run completed during grace window; crash injection SKIPPED (drain window too short)."
+        log "         Increase load (BOOTSTRAP_SIZE / change_count) or lower CRASH_DELAY_MS to widen it."
+        CRASH_INJECTED="skipped"
+        return 0
+    fi
+
+    local killed_pid="$DRASI_PID"
+    local crash_start; crash_start=$(date +%s)
+    log "INJECT: SIGKILL drasi-server pid=$killed_pid (drain-phase hard crash)"
+    printf '[dyn] ===== SIGKILL (drain-phase crash) pid=%s %s =====\n' \
+        "$killed_pid" "$(date -u +%FT%TZ)" >> "$LOG_DIR/drasi-server.log"
+    kill -KILL "$killed_pid" 2>/dev/null || true
+    # Reap the killed background job so it doesn't linger as a zombie.
+    wait "$killed_pid" 2>/dev/null || true
+
+    if ! restart_drasi_server; then
+        log "ERROR: drasi-server failed to restart after crash"
+        return 1
+    fi
+
+    local recovery_s=$(( $(date +%s) - crash_start ))
+    log "RECOVERY: server healthy again ${recovery_s}s after SIGKILL"
+    CRASH_INJECTED="yes"
+    CRASH_RECOVERY_SECS="$recovery_s"
+
+    # Confirm the restart repopulated the component registry (persistConfig path).
+    # If it came back bare, optionally re-apply via REST as a fallback.
+    local qcount
+    qcount="$(curl -fsS "${DRASI_API}/queries" 2>/dev/null | jq -r 'if type=="array" then length elif has("queries") then (.queries|length) else 0 end' 2>/dev/null || echo 0)"
+    log "Post-recovery component check: /queries reports $qcount query(ies)"
+    if [[ "${qcount:-0}" == "0" ]]; then
+        case "$CRASH_REAPPLY_COMPONENTS" in
+            auto)
+                log "WARNING: recovered server has no components; re-applying via REST."
+                log "WARNING: re-applying re-bootstraps queries and BYPASSES WAL-replay recovery -- results are NOT a pure recovery signal."
+                apply_server_components || { log "ERROR: component re-apply after recovery failed"; return 1; }
+                CRASH_INJECTED="reapplied"
+                ;;
+            no)
+                log "ERROR: recovered server has no components and CRASH_REAPPLY_COMPONENTS=no; failing so the gap is visible."
+                return 1
+                ;;
+        esac
+    fi
+    return 0
 }
 
 # drasi_apply <resource-path> <json-body>
@@ -1536,6 +1759,9 @@ write_step_summary() {
         echo "- batching speed: \`$BATCHING_SPEED\` (batch_size=$BATCH_SIZE, wait_ms=$BATCH_WAIT_MS)"
         echo "- query tuning: \`$QUERY_TUNING\` (priorityQueueCapacity=$PRIORITY_QUEUE_CAP, dispatchBufferCapacity=$DISPATCH_BUFFER_CAP, bootstrapBufferSize=$BOOTSTRAP_BUFFER_SIZE)"
         echo "- server config: persistIndex=\`$SERVER_PROFILE_PERSIST_INDEX\`, stateStore=\`$SERVER_PROFILE_STATE_STORE\`$([[ "$SERVER_PERSIST_INDEX" == "true" ]] && echo " (source WAL durability on, max_events=$WAL_MAX_EVENTS)")"
+        if [[ "$CRASH_INJECT" != "off" ]]; then
+            echo "- crash injection: \`$CRASH_INJECT\` -> outcome=\`$CRASH_INJECTED\`$([[ -n "$CRASH_RECOVERY_SECS" ]] && echo ", recovery=${CRASH_RECOVERY_SECS}s")"
+        fi
         echo
 
         echo "### Reactions"
@@ -1609,6 +1835,7 @@ download_drasi_server
 resolve_batching_preset
 resolve_query_tuning
 resolve_selected_queries
+resolve_crash_inject
 resolve_server_config
 resolve_bootstrap_preset
 clamp_batch_for_bootstrap
@@ -1617,6 +1844,13 @@ patch_bootstrap_preset
 start_drasi_server
 apply_server_components
 start_test_service
+
+if [[ "$CRASH_INJECT" == "drain" ]]; then
+    inject_crash_and_restart || {
+        log "ERROR: crash injection/restart failed; continuing to capture artifacts"
+        CRASH_INJECTED="failed"
+    }
+fi
 
 poll_rc=0
 if wait_for_completion_signal; then
