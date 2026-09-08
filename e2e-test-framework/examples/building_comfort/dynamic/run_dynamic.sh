@@ -216,10 +216,6 @@ CRASH_REAPPLY_COMPONENTS="${CRASH_REAPPLY_COMPONENTS:-auto}"
 # drain-injection run defaults this to `info` (below) so WAL-replay / recovery
 # lines land in drasi-server.log; override to e.g. debug for deeper tracing.
 DRASI_RUST_LOG="${DRASI_RUST_LOG:-}"
-# A drain-injection run forces per-record reaction JSONL on (LOG_JSONL=1) so the
-# recovered final state can be diffed row-by-row against a clean run when the
-# determinism SHA mismatches. Set CRASH_NO_JSONL=1 to opt out (e.g. perf timing).
-CRASH_NO_JSONL="${CRASH_NO_JSONL:-0}"
 # Escape hatch for a NON-PERSISTENT control run. By default `drain` forces
 # persistence on (a SIGKILL with in-memory-only state cannot recover). Set this
 # to 1 to honour the PERSIST_INDEX / STATE_STORE inputs instead, so you can
@@ -758,10 +754,13 @@ resolve_crash_inject() {
     if [[ -z "$DRASI_RUST_LOG" ]]; then
         DRASI_RUST_LOG="info"
     fi
-    # Keep the per-record reaction JSONL so a SHA mismatch can be diagnosed by
-    # diffing the recovered final state against a clean run.
-    if [[ "$CRASH_NO_JSONL" != "1" ]]; then
-        LOG_JSONL=1
+    # Per-record reaction JSONL makes the recovered final state diffable row-by-row
+    # but adds per-record disk I/O that markedly slows a 100k-change run. Leave it
+    # to the caller (LOG_JSONL=1) rather than forcing it, so the crash run's timing
+    # matches the ordinary path; the determinism verdict + record counts already
+    # answer pass/fail without it.
+    if [[ "$LOG_JSONL" != "1" ]]; then
+        log "CRASH_INJECT=drain: LOG_JSONL=0 (fast). Set LOG_JSONL=1 for a row-level forensic diff if the SHA mismatches."
     fi
     log "CRASH_INJECT=drain: SIGKILL after source-finished (+${CRASH_DELAY_MS}ms), restart preserving ./data (reapply_components=$CRASH_REAPPLY_COMPONENTS, server RUST_LOG=$DRASI_RUST_LOG, LOG_JSONL=$LOG_JSONL)"
 }
@@ -1267,8 +1266,10 @@ wait_for_source_finished() {
     local marker="Script Finished for TestRunSource"
     local completion="TestRun '${TEST_RUN_ID}' completed:"
     log "Waiting for source-finished marker before crash injection"
-    log "  marker: $marker  (timeout=${TIMEOUT_SECS}s)"
+    log "  marker: $marker  (timeout=${TIMEOUT_SECS}s interval=${POLL_INTERVAL_SECS}s)"
     local deadline=$(( $(date +%s) + TIMEOUT_SECS ))
+    local start_ts; start_ts=$(date +%s)
+    local last_log_ts=0
     local now; now=$(date +%s)
     while (( now < deadline )); do
         if ! kill -0 "$SERVICE_PID" 2>/dev/null; then
@@ -1286,10 +1287,18 @@ wait_for_source_finished() {
             log "WARNING: run completed before source-finished marker; drain window missed"
             return 2
         fi
+        # Progress heartbeat so a slow-but-moving dispatch is distinguishable from
+        # a genuine stall. Shows per-reaction record counts (climbing = flowing).
+        if (( now - last_log_ts >= 30 )); then
+            log "waiting for source-finished t=$(( now - start_ts ))s (no marker yet)$(reaction_progress)"
+            last_log_ts=$now
+        fi
         sleep "$POLL_INTERVAL_SECS"
         now=$(date +%s)
     done
     log "ERROR: source-finished marker not observed within ${TIMEOUT_SECS}s"
+    log "--- test-service.log (last 100 lines) ---"; tail -n 100 "$log_file" 2>/dev/null || true
+    log "--- drasi-server.log (last 100 lines) ---"; tail -n 100 "$LOG_DIR/drasi-server.log" 2>/dev/null || true
     return 1
 }
 
@@ -1349,11 +1358,22 @@ inject_crash_and_restart() {
     log "RECOVERY: server healthy again ${recovery_s}s after SIGKILL"
     CRASH_INJECTED="yes"
     CRASH_RECOVERY_SECS="$recovery_s"
+    # Reaction record counts at the moment of recovery. Compare against the
+    # completion-loop progress lines: climbing => the recovered server is
+    # re-emitting/catching up; frozen here => it delivered nothing post-restart
+    # (lost in-flight work or reaction not re-subscribed).
+    log "Reaction counts at recovery:$(reaction_progress)"
 
     # Confirm the restart repopulated the component registry (persistConfig path).
-    # If it came back bare, optionally re-apply via REST as a fallback.
+    # If it came back bare, optionally re-apply via REST as a fallback. The admin
+    # API wraps the list as {"success":..,"data":[..]}, so read .data (falling back
+    # to a bare array / .queries for older shapes).
     local qcount
-    qcount="$(curl -fsS "${DRASI_API}/queries" 2>/dev/null | jq -r 'if type=="array" then length elif has("queries") then (.queries|length) else 0 end' 2>/dev/null || echo 0)"
+    qcount="$(curl -fsS "${DRASI_API}/queries" 2>/dev/null \
+        | jq -r 'if has("data") then (.data | length)
+                 elif type=="array" then length
+                 elif has("queries") then (.queries | length)
+                 else 0 end' 2>/dev/null || echo 0)"
     log "Post-recovery component check: /queries reports $qcount query(ies)"
     if [[ "${qcount:-0}" == "0" ]]; then
         case "$CRASH_REAPPLY_COMPONENTS" in
