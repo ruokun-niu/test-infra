@@ -7,10 +7,6 @@
 name: Nightly perf
 
 on:
-  # TEMPORARY: remove after validating this workflow from the nightly-test branch.
-  push:
-    branches:
-      - nightly-test
   workflow_dispatch:
     inputs:
       variants:

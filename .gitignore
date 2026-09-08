@@ -22,5 +22,5 @@ __pycache__
 # Local-runner scratch dirs produced by examples/*/local/*/run_test*.sh
 # (downloaded drasi-server binary + plugins, ad-hoc artifacts)
 .local_run/
-# Throughput investigation scratch harness (see docs/building-comfort-throughput-investigation.md)
+# Throughput investigation scratch harness.
 e2e-test-framework/examples/building_comfort/local/perf_sweep/

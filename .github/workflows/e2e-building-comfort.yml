@@ -183,7 +183,7 @@ jobs:
     # ubuntu-latest (2-vCPU hosted). Larger runners (e.g. ubuntu-latest-8-cores)
     # aren't available on personal forks. Fine for the throughput RATIO and
     # functional/loss checks; precise absolute numbers should come from the
-    # pinned Azure self-hosted profile (docs/self-hosted-performance-runners.md).
+    # pinned Azure self-hosted profile.
     runs-on: ubuntu-latest
     # Job-level hard cap (separate from the `timeout_minutes` input, which only
     # bounds the driver's internal completion-wait loop -- see "Compute timeout

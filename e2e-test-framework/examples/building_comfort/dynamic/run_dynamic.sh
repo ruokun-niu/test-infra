@@ -149,7 +149,7 @@ DRASI_CORE_REF="${DRASI_CORE_REF:-}"
 DRASI_PLUGIN_TAG="${DRASI_PLUGIN_TAG:-}"
 # OCI registry the server resolves short plugin refs (source/http, ...) against.
 # Empty leaves the base config's `pluginRegistry` untouched so the server uses its
-# built-in default (ghcr.io/drasi-project). Set e.g. ghcr.io/ruokun-niu to pull the
+# built-in default (ghcr.io/drasi-project). Set e.g. ghcr.io/<owner> to pull the
 # plugins from a fork's package registry instead.
 DRASI_PLUGIN_REGISTRY="${DRASI_PLUGIN_REGISTRY:-}"
 DRASI_ADMIN_PORT="${DRASI_ADMIN_PORT:-8090}"
