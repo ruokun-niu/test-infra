@@ -94,6 +94,10 @@ on:
           - "off"
           - drain
         default: "off"
+      crash_allow_no_persist:
+        description: "Non-persistent control: let crash_inject=drain honour the persist_index/state_store checkboxes instead of forcing them on. Expect total state loss on crash (recovery baseline)."
+        type: boolean
+        default: false
       bootstrap_size:
         description: "Large-bootstrap preset (rooms). Scales the initial graph so bootstrap load is measured separately from steady-state."
         type: choice
@@ -311,6 +315,9 @@ jobs:
           # after ingress completes and restarts it against persisted state;
           # forces persistIndex + stateStore on. drasi_lib ignores it.
           CRASH_INJECT: ${{ inputs.crash_inject }}
+          # Non-persistent control: honour the persistence checkboxes under
+          # crash_inject=drain instead of forcing them on (expect state loss).
+          CRASH_ALLOW_NO_PERSIST: ${{ inputs.crash_allow_no_persist && '1' || '0' }}
           # Large-bootstrap preset (off|10k|100k|1m). Empty on scheduled runs ->
           # run_dynamic.sh leaves the committed small scenario unchanged. Only
           # the dynamic variants consume it; drasi_lib ignores it.

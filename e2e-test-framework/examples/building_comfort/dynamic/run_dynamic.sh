@@ -220,6 +220,11 @@ DRASI_RUST_LOG="${DRASI_RUST_LOG:-}"
 # recovered final state can be diffed row-by-row against a clean run when the
 # determinism SHA mismatches. Set CRASH_NO_JSONL=1 to opt out (e.g. perf timing).
 CRASH_NO_JSONL="${CRASH_NO_JSONL:-0}"
+# Escape hatch for a NON-PERSISTENT control run. By default `drain` forces
+# persistence on (a SIGKILL with in-memory-only state cannot recover). Set this
+# to 1 to honour the PERSIST_INDEX / STATE_STORE inputs instead, so you can
+# demonstrate the "no persistence -> total loss on crash" baseline for contrast.
+CRASH_ALLOW_NO_PERSIST="${CRASH_ALLOW_NO_PERSIST:-0}"
 # --- Large-bootstrap presets (#78) ---
 # BOOTSTRAP_SIZE selects a preset that scales the building_comfort initial graph
 # (delivered as op:"i" inserts) so bootstrap load time/throughput can be measured
@@ -739,10 +744,16 @@ resolve_crash_inject() {
             ;;
     esac
     if [[ "$SERVER_PROFILE_PERSIST_INDEX" != "true" || "$SERVER_PROFILE_STATE_STORE" != "true" ]]; then
-        log "CRASH_INJECT=drain requires persistence; forcing PERSIST_INDEX=true STATE_STORE=true (were persist_index=$SERVER_PROFILE_PERSIST_INDEX state_store=$SERVER_PROFILE_STATE_STORE)"
+        if [[ "$CRASH_ALLOW_NO_PERSIST" == "1" ]]; then
+            log "CRASH_INJECT=drain + CRASH_ALLOW_NO_PERSIST=1: NON-PERSISTENT control run."
+            log "  Honouring inputs (persist_index=$SERVER_PROFILE_PERSIST_INDEX state_store=$SERVER_PROFILE_STATE_STORE)."
+            log "  EXPECT recovery to FAIL/LOSE state: a SIGKILL discards in-memory-only query state and the restart comes back empty."
+        else
+            log "CRASH_INJECT=drain requires persistence; forcing PERSIST_INDEX=true STATE_STORE=true (were persist_index=$SERVER_PROFILE_PERSIST_INDEX state_store=$SERVER_PROFILE_STATE_STORE)"
+            SERVER_PROFILE_PERSIST_INDEX=true
+            SERVER_PROFILE_STATE_STORE=true
+        fi
     fi
-    SERVER_PROFILE_PERSIST_INDEX=true
-    SERVER_PROFILE_STATE_STORE=true
     # Capture the server's recovery/WAL-replay logs (default level info).
     if [[ -z "$DRASI_RUST_LOG" ]]; then
         DRASI_RUST_LOG="info"
@@ -1072,7 +1083,8 @@ patch_configs() {
     # Recovery needs the server to restore its component definitions on restart,
     # so flip persistConfig to true for a crash-injection run. The base yamls ship
     # persistConfig: false; without this the restarted server comes back bare.
-    if [[ "$CRASH_INJECT" == "drain" ]]; then
+    # Skipped for the non-persistent control run (nothing to restore anyway).
+    if [[ "$CRASH_INJECT" == "drain" && "$SERVER_PERSIST_INDEX" == "true" ]]; then
         if grep -qE '^persistConfig:' "$DRASI_CFG_CI"; then
             sed -E 's/^persistConfig:[[:space:]]*false[[:space:]]*$/persistConfig: true/' \
                 "$DRASI_CFG_CI" > "$DRASI_CFG_CI.tmp" && mv "$DRASI_CFG_CI.tmp" "$DRASI_CFG_CI"
