@@ -1,0 +1,8 @@
+{"kind":"Header","start_time":"2025-01-01T00:00:00Z","description":"Two inserts, crash boundary, two inserts, verification boundary."}
+{"kind":"SourceChange","offset_ns":0,"source_change_event":{"op":"i","reactivatorStart_ns":0,"reactivatorEnd_ns":0,"payload":{"source":{"db":"script-db","table":"node","ts_ns":0,"lsn":1},"before":null,"after":{"id":"item-1","labels":["Item"],"properties":{"ordinal":1}}}}}
+{"kind":"SourceChange","offset_ns":1000000,"source_change_event":{"op":"i","reactivatorStart_ns":0,"reactivatorEnd_ns":0,"payload":{"source":{"db":"script-db","table":"node","ts_ns":1000000,"lsn":2},"before":null,"after":{"id":"item-2","labels":["Item"],"properties":{"ordinal":2}}}}}
+{"kind":"PauseCommand","offset_ns":2000000,"label":"before-crash"}
+{"kind":"SourceChange","offset_ns":3000000,"source_change_event":{"op":"i","reactivatorStart_ns":0,"reactivatorEnd_ns":0,"payload":{"source":{"db":"script-db","table":"node","ts_ns":3000000,"lsn":3},"before":null,"after":{"id":"item-3","labels":["Item"],"properties":{"ordinal":3}}}}}
+{"kind":"SourceChange","offset_ns":4000000,"source_change_event":{"op":"i","reactivatorStart_ns":0,"reactivatorEnd_ns":0,"payload":{"source":{"db":"script-db","table":"node","ts_ns":4000000,"lsn":4},"before":null,"after":{"id":"item-4","labels":["Item"],"properties":{"ordinal":4}}}}}
+{"kind":"PauseCommand","offset_ns":5000000,"label":"after-resume"}
+{"kind":"Finish","offset_ns":6000000}

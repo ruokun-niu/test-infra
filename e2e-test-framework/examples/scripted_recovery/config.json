@@ -1,0 +1,43 @@
+{
+  "data_store": {
+    "data_store_path": "./cache",
+    "delete_on_start": false,
+    "delete_on_stop": false,
+    "test_repos": [{
+      "id": "local",
+      "kind": "LocalStorage",
+      "source_path": "./dev_repo",
+      "local_tests": [{
+        "test_id": "scripted_recovery",
+        "version": 1,
+        "description": "Scripted pause, optional server restart, and resume.",
+        "test_folder": "scripted_recovery",
+        "queries": [],
+        "sources": [{
+          "kind": "Script",
+          "test_source_id": "script-db",
+          "source_change_generator": {
+            "kind": "Script",
+            "script_file_folder": "source_change_scripts",
+            "spacing_mode": "none",
+            "time_mode": "recorded",
+            "ignore_scripted_pause_commands": false
+          },
+          "source_change_dispatchers": [{"kind": "JsonlFile", "max_events_per_file": 1}],
+          "subscribers": []
+        }],
+        "reactions": []
+      }]
+    }]
+  },
+  "test_run_host": {
+    "test_runs": [{
+      "test_repo_id": "local",
+      "test_id": "scripted_recovery",
+      "test_run_id": "run",
+      "queries": [],
+      "sources": [{"test_source_id": "script-db", "start_mode": "manual"}],
+      "reactions": []
+    }]
+  }
+}

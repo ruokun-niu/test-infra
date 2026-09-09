@@ -60,6 +60,9 @@ use super::{
 
 type ChangeStream = Pin<Box<dyn Stream<Item = anyhow::Result<SequencedChangeScriptRecord>> + Send>>;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScriptSourceChangeGeneratorError {
     #[error("ScriptSourceChangeGenerator is already finished. Reset to start over.")]
@@ -661,8 +664,11 @@ impl ScriptSourceChangeGeneratorInternalState {
                 // Process the PauseCommand only if the Player is not configured to ignore them.
                 if self.settings.ignore_scripted_pause_commands {
                     log::debug!("Ignoring Change Script Pause Command: {shifted_record:?}");
+                    self.load_next_change_stream_record().await?;
+                    self.schedule_next_change_stream_record().await?;
                 } else {
                     self.status = SourceChangeGeneratorStatus::Paused;
+                    self.load_next_change_stream_record().await?;
                 }
             }
             ChangeScriptRecord::Label(label_record) => {

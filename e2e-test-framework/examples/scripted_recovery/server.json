@@ -1,0 +1,29 @@
+{
+  "id": "scripted-pause-comparison",
+  "host": "127.0.0.1",
+  "port": 8092,
+  "persistConfig": true,
+  "persistIndex": true,
+  "enableUi": false,
+  "stateStore": {"kind": "redb", "path": "./data/state.redb"},
+  "autoInstallPlugins": false,
+  "verifyPlugins": true,
+  "plugins": [{"ref": "source/grpc"}, {"ref": "reaction/grpc"}],
+  "sources": [{
+    "kind": "grpc", "id": "script-db", "autoStart": true,
+    "host": "127.0.0.1", "port": 50063,
+    "durability": {"enabled": true, "max_events": 20000}
+  }],
+  "queries": [{
+    "id": "items", "autoStart": true,
+    "query": "MATCH (item:Item) RETURN item.ordinal AS Ordinal",
+    "queryLanguage": "Cypher", "enableBootstrap": false,
+    "outboxCapacity": 20000, "sources": [{"sourceId": "script-db"}]
+  }],
+  "reactions": [{
+    "kind": "grpc", "id": "items-out", "queries": ["items"], "autoStart": true,
+    "batchSize": 1, "batchFlushTimeoutMs": 100,
+    "endpoint": "grpc://127.0.0.1:50064",
+    "metadata": {"x-query-sequence": "items"}
+  }]
+}

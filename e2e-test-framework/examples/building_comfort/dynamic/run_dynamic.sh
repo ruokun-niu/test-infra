@@ -63,6 +63,7 @@
 #                         leave the config untouched (server default ghcr.io/drasi-project).
 #   DRASI_SERVER_BIN      pre-built binary (skips both download and source build)
 #   TEST_SERVICE_BIN      pre-built test-service binary (otherwise cargo run)
+#   TEST_SERVICE_RUST_LOG  framework log filter (info with noisy core modules suppressed)
 #   DRASI_ADMIN_PORT      admin/REST port patched into empty.yaml (8090)
 #   DRASI_SOURCE_PORT     source ingress port to wait for (50051)
 #   SERVER_SOURCE_FILE    components/server/ file (source_grpc.json)
@@ -202,10 +203,8 @@ WAL_MAX_EVENTS="${WAL_MAX_EVENTS:-500000}"
 # and patches persistConfig: true (so the server restores component definitions
 # on restart instead of coming back bare).
 CRASH_INJECT="${CRASH_INJECT:-off}"
-# Grace period (ms) to wait after the source-finished marker before the SIGKILL,
-# letting the dispatcher flush any in-flight events into the server's WAL so the
-# drain-phase crash does not lose un-ingested events.
-CRASH_DELAY_MS="${CRASH_DELAY_MS:-500}"
+# An optional timing delay is not a durability guarantee.
+CRASH_DELAY_MS="${CRASH_DELAY_MS:-0}"
 # What to do if the restarted server comes back with no components (i.e. the
 # persistConfig restore path did not repopulate the registry):
 #   auto (default) — re-apply components via REST only if GET shows none, and warn
@@ -216,6 +215,7 @@ CRASH_REAPPLY_COMPONENTS="${CRASH_REAPPLY_COMPONENTS:-auto}"
 # drain-injection run defaults this to `info` (below) so WAL-replay / recovery
 # lines land in drasi-server.log; override to e.g. debug for deeper tracing.
 DRASI_RUST_LOG="${DRASI_RUST_LOG:-}"
+TEST_SERVICE_RUST_LOG="${TEST_SERVICE_RUST_LOG:-info,drasi_core::query::continuous_query=error,drasi_core::path_solver=error}"
 # Escape hatch for a NON-PERSISTENT control run. By default `drain` forces
 # persistence on (a SIGKILL with in-memory-only state cannot recover). Set this
 # to 1 to honour the PERSIST_INDEX / STATE_STORE inputs instead, so you can
@@ -229,6 +229,11 @@ CRASH_ALLOW_NO_PERSIST="${CRASH_ALLOW_NO_PERSIST:-0}"
 # reaction's DeterminismHash) so we still get a verdict. Set higher if recovery
 # catch-up is slow/bursty on the runner.
 CRASH_SETTLE_SECS="${CRASH_SETTLE_SECS:-90}"
+# Use the settle-based completion (wait for reaction counts to stop changing, then
+# probe /results and stop) even for a non-crash run. Lets a run whose stop triggers
+# are unreachable (e.g. a reduced change_count vs a 100k-calibrated RecordCount)
+# still finish and capture the results-API probe, symmetric with the crash run.
+USE_SETTLE="${USE_SETTLE:-0}"
 # --- Large-bootstrap presets (#78) ---
 # BOOTSTRAP_SIZE selects a preset that scales the building_comfort initial graph
 # (delivered as op:"i" inserts) so bootstrap load time/throughput can be measured
@@ -1328,12 +1333,9 @@ inject_crash_and_restart() {
         return "$rc"
     fi
 
-    # Grace period so any in-flight dispatched events land in the WAL before the
-    # kill (otherwise the drain crash would lose un-ingested events, not test
-    # recovery). CRASH_DELAY_MS is milliseconds.
     local grace_s
     grace_s="$(awk -v ms="$CRASH_DELAY_MS" 'BEGIN { printf "%.3f", ms/1000 }')"
-    log "Grace ${CRASH_DELAY_MS}ms before SIGKILL (let ingress flush to WAL)"
+    log "Grace ${CRASH_DELAY_MS}ms before SIGKILL"
     sleep "$grace_s"
 
     if ! kill -0 "$DRASI_PID" 2>/dev/null; then
@@ -1627,7 +1629,7 @@ start_test_service() {
         log "Starting pre-built test-service: $TEST_SERVICE_BIN"
         (
             cd "$REPO_ROOT/e2e-test-framework"
-            export RUST_LOG='info,drasi_core::query::continuous_query=error,drasi_core::path_solver=error'
+            export RUST_LOG="$TEST_SERVICE_RUST_LOG"
             exec "$TEST_SERVICE_BIN" --config "$TEST_CFG_CI" \
                 > "$LOG_DIR/test-service.log" 2>&1
         ) &
@@ -1635,7 +1637,7 @@ start_test_service() {
         log "Building & starting test-service"
         (
             cd "$REPO_ROOT/e2e-test-framework"
-            RUST_LOG='info,drasi_core::query::continuous_query=error,drasi_core::path_solver=error' \
+            RUST_LOG="$TEST_SERVICE_RUST_LOG" \
             cargo run --release --manifest-path "test-service/Cargo.toml" -- --config "$TEST_CFG_CI" \
                 > "$LOG_DIR/test-service.log" 2>&1
         ) &
@@ -1709,6 +1711,7 @@ wait_for_completion_signal() {
         if [[ -s "$log_file" ]] && grep -qF "$marker" "$log_file"; then
             log "Completion signal observed for $TEST_RUN_ID"
             grep -F "$marker" "$log_file" | tail -n1 | sed 's/^/[completion] /'
+            probe_query_results
             return 0
         fi
         local elapsed
@@ -1741,6 +1744,29 @@ reaction_total_count() {
         got=1
     done
     (( got )) && printf '%s' "$total"
+}
+
+# Probe drasi-server's OWN materialised results via the admin results API
+# (GET /queries/:id/results). This reads the server's state directly, decoupled
+# from whatever any reaction received -- the true oracle for "did the server
+# recover the correct state?". Must be called while the queries are still live
+# (before any stop). Saves one file per query into $ARTIFACTS_DIR.
+probe_query_results() {
+    local qids qid out n
+    qids="$(curl -fsS "${DRASI_API}/queries" 2>/dev/null | jq -r '(.data // .)[]?.id' 2>/dev/null)"
+    if [[ -z "$qids" ]]; then
+        log "probe_query_results: no queries returned by ${DRASI_API}/queries"
+        return 0
+    fi
+    for qid in $qids; do
+        out="$ARTIFACTS_DIR/query_results__${qid}.json"
+        if curl -fsS "${DRASI_API}/queries/${qid}/results" -o "$out" 2>/dev/null; then
+            n="$(jq -r '(.data // .) | if type=="array" then length else 0 end' "$out" 2>/dev/null || echo '?')"
+            log "probe_query_results: [$qid] server holds $n result row(s) -> query_results__${qid}.json"
+        else
+            log "probe_query_results: [$qid] results API call failed"
+        fi
+    done
 }
 
 # Stop the whole test run via REST. Finalises each reaction's loggers (the
@@ -1786,6 +1812,7 @@ wait_for_recovery_completion() {
         fi
         if [[ -s "$log_file" ]] && grep -qF "$marker" "$log_file"; then
             log "Completion signal observed for $TEST_RUN_ID (recovery re-emitted to threshold)"
+            probe_query_results
             return 0
         fi
         local total; total="$(reaction_total_count)"
@@ -1794,8 +1821,9 @@ wait_for_recovery_completion() {
                 last_count="$total"; last_change_ts=$now
             elif (( now - last_change_ts >= CRASH_SETTLE_SECS )); then
                 log "Reaction counts settled at total=$total for ${CRASH_SETTLE_SECS}s with no completion marker."
-                log "  Recovery converged below the RecordCount stop threshold; stopping run to capture the verdict."
+                log "  INCONCLUSIVE: quiet reaction counts do not prove query catch-up; stopping to collect diagnostics."
                 CRASH_SETTLED="yes"
+                probe_query_results
                 stop_test_run_via_rest
                 return 0
             fi
@@ -2032,9 +2060,10 @@ if [[ "$CRASH_INJECT" == "drain" ]]; then
 fi
 
 poll_rc=0
-if [[ "$CRASH_INJECT" == "drain" ]]; then
-    # Recovery can converge without firing the RecordCount marker, so use the
-    # settle-aware wait (it stops the run on settle to finalise the hashes).
+if [[ "$CRASH_INJECT" == "drain" || "$USE_SETTLE" == "1" ]]; then
+    # Recovery (or a reduced-load run with unreachable stop triggers) can converge
+    # without firing the RecordCount marker, so use the settle-aware wait (it probes
+    # /results and stops the run on settle).
     if wait_for_recovery_completion; then
         for id in $TEST_REACTION_IDS; do
             fetch_final_reaction_state "$id" || poll_rc=1
@@ -2050,6 +2079,11 @@ else
     poll_rc=1
 fi
 print_summary
+
+if [[ "$CRASH_INJECT" == "drain" && ( "$CRASH_INJECTED" != "yes" || "$CRASH_SETTLED" == "yes" ) ]]; then
+    log "ERROR: recovery was not verified (injection=$CRASH_INJECTED, count-settle=$CRASH_SETTLED)"
+    poll_rc=1
+fi
 
 determinism_rc=0
 verify_test_run_status || determinism_rc=$?

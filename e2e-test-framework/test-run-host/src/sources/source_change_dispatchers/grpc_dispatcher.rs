@@ -63,6 +63,36 @@ pub struct GrpcSourceChangeDispatcher {
     channel: Option<Channel>,
 }
 
+struct BatchAcknowledgments {
+    expected: u64,
+    processed: u64,
+}
+
+impl BatchAcknowledgments {
+    fn observe(&mut self, success: bool, processed: u64, error: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(success, "Batch dispatch failed: {error}");
+        anyhow::ensure!(
+            processed >= self.processed && processed <= self.expected,
+            "Invalid cumulative acknowledgment: previous {}, received {}, expected {}",
+            self.processed,
+            processed,
+            self.expected
+        );
+        self.processed = processed;
+        Ok(())
+    }
+
+    fn finish(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.processed == self.expected,
+            "Batch acknowledgment mismatch: sent {}, acknowledged {}",
+            self.expected,
+            self.processed
+        );
+        Ok(())
+    }
+}
+
 impl GrpcSourceChangeDispatcher {
     pub async fn new(
         definition: &GrpcSourceChangeDispatcherDefinition,
@@ -192,27 +222,27 @@ impl SourceChangeDispatcher for GrpcSourceChangeDispatcher {
 
             let mut response_stream = client.stream_events(request).await?.into_inner();
 
-            let mut total_processed = 0u64;
+            let mut acknowledgments = BatchAcknowledgments {
+                expected: events.len() as u64,
+                processed: 0,
+            };
             while let Some(response) = response_stream
                 .message()
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to receive stream response: {e}"))?
             {
-                if !response.success {
-                    error!(
-                        "Drasi SourceService batch dispatch failed: {}",
-                        response.error
-                    );
-                    if !response.error.is_empty() {
-                        anyhow::bail!("Batch dispatch failed: {}", response.error);
-                    }
-                }
-                total_processed += response.events_processed;
+                acknowledgments.observe(
+                    response.success,
+                    response.events_processed,
+                    &response.error,
+                )?;
             }
+
+            acknowledgments.finish()?;
 
             trace!(
                 "Successfully dispatched {} events to Drasi SourceService",
-                total_processed
+                acknowledgments.processed
             );
         } else {
             // Use SubmitEvent for individual dispatch
@@ -238,9 +268,7 @@ impl SourceChangeDispatcher for GrpcSourceChangeDispatcher {
                         "Drasi SourceService event submission failed: {}",
                         resp.error
                     );
-                    if !resp.error.is_empty() {
-                        anyhow::bail!("Event submission failed: {}", resp.error);
-                    }
+                    anyhow::bail!("Event submission failed: {}", resp.error);
                 }
             }
 
@@ -257,6 +285,41 @@ impl SourceChangeDispatcher for GrpcSourceChangeDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cumulative_acknowledgments_accept_repeated_final_total() {
+        let mut acknowledgments = BatchAcknowledgments {
+            expected: 200,
+            processed: 0,
+        };
+        for processed in [100, 200, 200] {
+            acknowledgments.observe(true, processed, "").unwrap();
+        }
+        acknowledgments.finish().unwrap();
+    }
+
+    #[test]
+    fn cumulative_acknowledgments_reject_short_or_empty_stream() {
+        let mut acknowledgments = BatchAcknowledgments {
+            expected: 200,
+            processed: 0,
+        };
+        assert!(acknowledgments.finish().is_err());
+        acknowledgments.observe(true, 100, "").unwrap();
+        assert!(acknowledgments.finish().is_err());
+    }
+
+    #[test]
+    fn cumulative_acknowledgments_reject_failures_and_invalid_counts() {
+        let mut acknowledgments = BatchAcknowledgments {
+            expected: 200,
+            processed: 0,
+        };
+        assert!(acknowledgments.observe(false, 0, "").is_err());
+        acknowledgments.observe(true, 100, "").unwrap();
+        assert!(acknowledgments.observe(true, 99, "").is_err());
+        assert!(acknowledgments.observe(true, 201, "").is_err());
+    }
 
     #[test]
     fn test_settings_creation() {
