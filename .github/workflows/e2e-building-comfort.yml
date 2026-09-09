@@ -1,4 +1,4 @@
-# Scheduled / manual E2E tests for the building_comfort scenario.
+# Manual E2E tests for the building_comfort scenario on GitHub-hosted runners.
 #
 # Coverage is DYNAMIC-first: variants boot a BARE Drasi Server and apply the
 # scenario at runtime via the admin REST API from reusable component JSON
@@ -20,7 +20,6 @@
 # determinism-passing run is confirmed.
 #
 # Variant selection:
-#   - Scheduled: 07:00 UTC runs all five variants in one matrix.
 #   - Manual: tick a checkbox per variant; the matrix is built from checked.
 
 name: E2E - building_comfort
@@ -105,8 +104,6 @@ on:
       # Source-build escape hatch, manual dispatch only. Setting EITHER of the
       # next two builds drasi-server from source instead of downloading a
       # release; a repo without a ref builds that repo's default branch.
-      # Scheduled runs leave both empty and download the release binary,
-      # keeping the published time series comparable.
       drasi_server_repo:
         description: "drasi-server repo (owner/name) to BUILD from source. Empty = drasi-project/drasi-server."
         required: false
@@ -120,7 +117,7 @@ on:
         required: false
         default: "30"
       # --- Plugin source overrides (manual dispatch only) ---
-      # Empty on scheduled runs -> the server uses its built-in defaults
+      # Empty inputs -> the server uses its built-in defaults
       # (registry ghcr.io/drasi-project, latest-compatible tag). Set these to
       # pull the source/reaction plugins from a fork's package registry and/or a
       # specific tag (e.g. a work-in-progress build) without editing the config.
@@ -317,45 +314,3 @@ jobs:
           name: building_comfort-${{ matrix.variant }}
           path: ${{ runner.temp }}/artifacts
           if-no-files-found: warn
-
-      # Build the durable summary record for drasi-project/test-results.
-      # Runs even when the test failed: a failed run is a datapoint too.
-      - name: Build result summary
-        if: always()
-        env:
-          WORKFLOW_FILE: e2e-building-comfort.yml
-          RUNNER_LABEL: ubuntu-latest
-        run: |
-          python3 .github/scripts/emit_summary.py \
-            --artifacts "${{ runner.temp }}/artifacts" \
-            --scenario building_comfort \
-            --variant "${{ matrix.variant }}" \
-            --job-status "${{ steps.test.outcome }}" \
-            --output "${{ runner.temp }}/summary/building_comfort__${{ matrix.variant }}.json"
-
-      - name: Upload result summary
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: summary-building_comfort-${{ matrix.variant }}
-          path: ${{ runner.temp }}/summary
-          if-no-files-found: warn
-
-  # Publish the summaries to drasi-project/test-results, which keeps a small
-  # permanent history (GitHub artifacts expire after 90 days). One job, one
-  # commit, one push - see publish-test-results.yml for why aggregating
-  # matters. `always()` so a failed test run is still recorded.
-  #
-  # Scheduled runs only. The published history is a time series, so every
-  # point has to be comparable: same trigger, same cadence, no operator
-  # choosing when to record. Manual runs exist to try things out - a different
-  # drasi-server version, a branch, a one-off timeout - and mixing those in
-  # would put unexplained spikes in the trend with nothing in the record to
-  # explain them. To exercise this path from a branch, temporarily widen this
-  # condition rather than publishing dispatch runs by default.
-  publish-results:
-    needs: [building-comfort]
-    if: always() && github.event_name == 'schedule'
-    uses: ./.github/workflows/publish-test-results.yml
-    secrets:
-      TEST_RESULTS_APP_PRIVATE_KEY: ${{ secrets.TEST_RESULTS_APP_PRIVATE_KEY }}

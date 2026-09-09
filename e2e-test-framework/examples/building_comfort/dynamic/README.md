@@ -291,7 +291,9 @@ DRASI_SOURCE_PORT=50051 ./run_dynamic.sh
 ## Run it in CI
 
 The dynamic variants live in the shared workflow
-`.github/workflows/e2e-building-comfort.yml` (`workflow_dispatch` + scheduled).
+[.github/workflows/e2e-building-comfort.yml](../../../../.github/workflows/e2e-building-comfort.yml)
+(`workflow_dispatch`, GitHub-hosted runners). This workflow retains diagnostic
+artifacts but does not generate or publish summaries to `drasi-project/test-results`.
 
 **Variant selection** is one checkbox per variant (GitHub renders boolean inputs
 as checkboxes); tick any of:
@@ -305,34 +307,43 @@ as checkboxes); tick any of:
 
 **Config axes** are separate dropdown/checkbox inputs applied to whichever
 dynamic variants run: `batching_speed`, `query_tuning`, `persist_index`,
-`state_store` (see the matrix above). On **scheduled** runs the inputs are
-absent, so the driver falls back to each axis's default.
+`state_store` (see the matrix above).
 
-The workflow's *Resolve variant* step maps every non-`drasi_lib` variant onto the
-`run_dynamic.sh` `*_FILE` / port / `TEST_CFG_SRC` env knobs; `drasi_lib` uses its
-own `ci/drasi_lib/run_test_ci.sh`. The config-axis env vars (`BATCHING_SPEED`,
+The workflow calls `run_variant.sh`, which maps every non-`drasi_lib` variant
+onto the `run_dynamic.sh` `*_FILE` / port / `TEST_CFG_SRC` env knobs; `drasi_lib`
+uses its own `ci/drasi_lib/run_test_ci.sh`. The config-axis env vars (`BATCHING_SPEED`,
 `QUERY_TUNING`, `PERSIST_INDEX`, `STATE_STORE`) are passed straight through on
 the *Run test* step.
 
-### Nightly full-stack performance test
+### Nightly full-stack E2E test
 
-`.github/workflows/nightly-perf.yml` runs daily at 22:00 UTC, allowing for both
-GitHub scheduling delays and drasi-core's roughly 2.5-hour nightly plugin build.
-It can also be started manually.
+The **Nightly** workflow in
+[.github/workflows/nightly.yml](../../../../.github/workflows/nightly.yml)
+runs daily at 22:00 UTC on GitHub-hosted runners. Core's nightly starts at
+14:00 UTC; the gap allows for GitHub scheduling delays and its roughly 2.5-hour
+plugin build. It can also be started manually. Scheduled workflows run from the
+repository's default branch.
 
-The workflow first queries the latest completed `nightly.yml` run in
-`drasi-project/drasi-core`. It proceeds only when that run succeeded within the
-last 24 hours; otherwise it skips neutrally because core's own nightly reports
-its failures.
+Scheduled and manual runs always attempt the selected tests, without checking
+the upstream nightly's status or freshness. Build, plugin-loading, and test
+failures fail the run normally. If plugin publishing failed, the
+`drasi-nightly-test` tag may still point to an earlier build.
 
-Each performance job:
+Each E2E job:
 
 1. builds drasi-server from `main`;
 2. patches its drasi-core dependencies to drasi-core `main`;
 3. pins server plugins to `drasi-nightly-test`;
 4. runs the `http_standard` and `grpc_standard` building-comfort variants with
-   the `10k` bootstrap preset; and
-5. uploads metrics, determinism verdicts, and logs.
+  the committed small scenario (`bootstrap_size: off`) and its determinism
+  baselines; and
+5. uploads diagnostic artifacts, including determinism verdicts and logs.
+
+This is a functional regression check, not a performance reporting run. No
+results are published to `drasi-project/test-results`. Large-bootstrap presets
+remain available for manual investigations. Server and core use current `main`,
+which may have advanced since the nightly plugins were published; they are not
+pinned to the plugin build's commit.
 
 All cross-repository references remain in the dependency direction
 test-infra → drasi-server → drasi-core. Neither lower-level repository needs a
