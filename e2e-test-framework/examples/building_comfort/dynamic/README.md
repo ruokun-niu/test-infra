@@ -334,9 +334,10 @@ Each E2E job:
 1. builds drasi-server from `main`;
 2. patches its drasi-core dependencies to drasi-core `main`;
 3. pins server plugins to `drasi-nightly-test`;
-4. runs the `http_standard` and `grpc_standard` building-comfort variants with
-  the committed small scenario (`bootstrap_size: off`) and its determinism
-  baselines; and
+4. runs one of the `http_standard`, `http_adaptive`, `grpc_standard`, and
+  `grpc_adaptive` building-comfort variants (all four selected by default), using
+  the shared variant runner and the committed small scenario
+  (`bootstrap_size: off`) with its determinism baselines; and
 5. uploads diagnostic artifacts, including determinism verdicts and logs.
 
 This is a functional regression check, not a performance reporting run. No

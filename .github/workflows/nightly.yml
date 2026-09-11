@@ -7,15 +7,12 @@
 name: Nightly
 
 on:
-  push:
-    branches:
-      - nightly-test-core
   workflow_dispatch:
     inputs:
       variants:
         description: "Comma/space-separated variants."
         required: false
-        default: "http_standard grpc_standard"
+        default: "http_standard http_adaptive grpc_standard grpc_adaptive"
       drasi_server_repo:
         description: "drasi-server repository to build (owner/name)."
         required: false
@@ -57,7 +54,7 @@ permissions:
   contents: read
 
 env:
-  DEFAULT_VARIANTS: "http_standard grpc_standard"
+  DEFAULT_VARIANTS: "http_standard http_adaptive grpc_standard grpc_adaptive"
   DEFAULT_SERVER_REPO: "drasi-project/drasi-server"
   DEFAULT_SERVER_REF: "main"
   DEFAULT_CORE_REPO: "drasi-project/drasi-core"
@@ -151,29 +148,6 @@ jobs:
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=$(dirname "$(find /usr/lib -name 'libjq.so' | head -1)")" >> "$GITHUB_ENV"
 
-      - name: Resolve variant
-        run: |
-          DD="e2e-test-framework/examples/building_comfort/dynamic"
-          echo "RUN_SCRIPT=$DD/run_dynamic.sh" >> "$GITHUB_ENV"
-          echo "SERVER_QUERIES_FILE=queries.json" >> "$GITHUB_ENV"
-          case "$VARIANT" in
-            http_standard)
-              echo "SERVER_SOURCE_FILE=source_http.json" >> "$GITHUB_ENV"
-              echo "SERVER_REACTIONS_FILE=reactions_http.json" >> "$GITHUB_ENV"
-              echo "DRASI_SOURCE_PORT=9000" >> "$GITHUB_ENV"
-              echo "TEST_CFG_SRC=$GITHUB_WORKSPACE/$DD/config.http.json" >> "$GITHUB_ENV"
-              ;;
-            grpc_standard)
-              echo "SERVER_SOURCE_FILE=source_grpc.json" >> "$GITHUB_ENV"
-              echo "SERVER_REACTIONS_FILE=reactions_grpc.json" >> "$GITHUB_ENV"
-              echo "DRASI_SOURCE_PORT=50051" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "Unsupported nightly E2E variant: $VARIANT" >&2
-              exit 1
-              ;;
-          esac
-
       - name: Build test-service
         working-directory: e2e-test-framework
         run: cargo build --release --manifest-path test-service/Cargo.toml
@@ -183,7 +157,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARTIFACTS_DIR: ${{ runner.temp }}/artifacts
           WORK_DIR: ${{ runner.temp }}/ci_work
-        run: bash "$RUN_SCRIPT"
+        run: bash e2e-test-framework/examples/building_comfort/run_variant.sh
 
       - name: Upload artifacts
         if: always()
